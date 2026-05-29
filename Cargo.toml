@@ -1,0 +1,14 @@
+[package]
+name = "synthetic-sylvaculture"
+version = "0.1.0"
+edition = "2021"
+description = "Reproduction of Makowski et al. 2019, Synthetic Silviculture: Multi-scale Modeling of Plant Ecosystems"
+
+[dependencies]
+three-d = "0.19"
+glam = "0.29"
+rand = "0.8"
+rand_chacha = "0.3"
+
+[profile.release]
+opt-level = 3
