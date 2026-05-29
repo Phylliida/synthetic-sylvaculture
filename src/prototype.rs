@@ -57,6 +57,24 @@ impl Prototype {
     pub fn is_terminal(&self, node: usize) -> bool {
         self.terminals.contains(&node)
     }
+
+    /// Centroid of the mature local node layout (module-local frame). Used to
+    /// place the module's predicted bounding sphere during orientation
+    /// optimization.
+    pub fn local_centroid(&self) -> Vec3 {
+        let sum: Vec3 = self.nodes.iter().map(|n| n.pos).fold(Vec3::ZERO, |a, b| a + b);
+        sum / self.nodes.len() as f32
+    }
+
+    /// Enclosing radius of the mature local layout about its centroid.
+    pub fn local_radius(&self) -> f32 {
+        let c = self.local_centroid();
+        self.nodes
+            .iter()
+            .map(|n| (n.pos - c).length())
+            .fold(0.0f32, f32::max)
+            + 0.1
+    }
 }
 
 /// Helper to build a prototype from a flat list of (position, parent) pairs and

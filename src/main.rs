@@ -41,6 +41,25 @@ fn run_stats() {
             }
         }
     }
+
+    println!("\norientation optimization vs naive (Fig. 15a metric, λ=0.5, 120 steps):");
+    for (label, opt) in [("naive", false), ("optimized", true)] {
+        let mut params = PlantParams::default();
+        params.lambda = 0.5;
+        params.collision_light = opt;
+        params.optimize_orientation = opt;
+        let mut plant = make_plant(params);
+        for _ in 0..120 {
+            plant.step(1.0);
+        }
+        println!(
+            "  {:<9}  modules {:>4}  intersection-volume ratio {:>6.1}%  height {:.2}",
+            label,
+            plant.module_count(),
+            100.0 * plant.intersection_ratio(),
+            plant.height()
+        );
+    }
 }
 
 fn main() {
@@ -99,6 +118,10 @@ fn main() {
 
     // --- simulation state ---
     let mut params = PlantParams::default();
+    // Sec. 5.2.3 model on by default: branches avoid collisions and compete for
+    // light. Toggle live with O / L.
+    params.collision_light = true;
+    params.optimize_orientation = true;
     let mut plant = make_plant(params.clone());
     let mut tree = Gm::new(
         Mesh::new(&context, &mesh::build_tree_mesh(&plant.skeleton(), 8)),
@@ -116,9 +139,10 @@ fn main() {
 
     println!("Synthetic Sylvaculture — single plant growth");
     println!("  Space play/pause · S step · R reset · ←/→ λ · ↑/↓ growth rate");
+    println!("  O orientation-opt toggle · L collision-light toggle");
     println!(
-        "  start: λ={:.2}  gp={:.2}  v_root_max={:.0}",
-        params.lambda, params.gp, params.v_root_max
+        "  start: λ={:.2}  gp={:.2}  orient-opt={}  collision-light={}",
+        params.lambda, params.gp, params.optimize_orientation, params.collision_light
     );
 
     window.render_loop(move |mut frame_input| {
@@ -156,6 +180,14 @@ fn main() {
                         params.gp = (params.gp - 0.05).clamp(0.05, 1.0);
                         reset = true;
                     }
+                    Key::O => {
+                        params.optimize_orientation = !params.optimize_orientation;
+                        reset = true;
+                    }
+                    Key::L => {
+                        params.collision_light = !params.collision_light;
+                        reset = true;
+                    }
                     _ => {}
                 }
             }
@@ -167,9 +199,11 @@ fn main() {
             accum_ms = 0.0;
             dirty = true;
             println!(
-                "[reset] λ={:.2}  gp={:.2}  ({})",
+                "[reset] λ={:.2}  gp={:.2}  orient-opt={}  collision-light={}  ({})",
                 params.lambda,
                 params.gp,
+                params.optimize_orientation,
+                params.collision_light,
                 if params.lambda > 0.5 {
                     "excurrent"
                 } else {

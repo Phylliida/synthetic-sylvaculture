@@ -59,6 +59,25 @@ pub struct PlantParams {
     pub g2: f32,
     /// Maximum plant age before senescence begins (p_max).
     pub p_max: f32,
+
+    // --- Sec. 5.2.3 module orientation optimization + collision light ---
+    /// Use collision-based light Q = exp(−scale·f_collisions) instead of Q=1.
+    pub collision_light: bool,
+    /// Scale on f_collisions inside the light exponential.
+    pub light_scale: f32,
+    /// Run gradient-descent orientation optimization for new modules.
+    pub optimize_orientation: bool,
+    /// Collision-avoidance weight ω1 in f_distribution (Eq. 3).
+    pub omega1: f32,
+    /// Tropism weight ω2 in f_distribution (Eq. 3 / Tab. 4).
+    pub omega2: f32,
+    /// Gravitropic set-point angle (rad) from vertical used by f_tropism (Eq. 4).
+    pub tropism_set_angle: f32,
+    /// Per-step rotation increment α used by the optimizer's candidate set
+    /// P = {±α about local x, ±α about local z} (App. A.1).
+    pub opt_angle: f32,
+    /// Number of gradient-descent steps per optimization (~3 per the paper).
+    pub opt_iters: u32,
 }
 
 impl Default for PlantParams {
@@ -77,6 +96,16 @@ impl Default for PlantParams {
             g1: 1.0,
             g2: -0.35,
             p_max: 1.0e9, // effectively no senescence in milestone 1
+            // Sec. 5.2.3 features default OFF so the base-model tests stay
+            // exact; the viewer and the orientation tests enable them.
+            collision_light: false,
+            light_scale: 0.5,
+            optimize_orientation: false,
+            omega1: 1.0,
+            omega2: 0.35,
+            tropism_set_angle: 0.0,
+            opt_angle: 0.4,
+            opt_iters: 6,
         }
     }
 }
@@ -166,16 +195,38 @@ impl Plant {
     /// Advance the simulation by one step of size `dt`.
     pub fn step(&mut self, dt: f32) {
         self.age += dt;
-        self.light_pass();
+        // Collision-based light reads the current geometry's bounding spheres.
+        let spheres = if self.params.collision_light {
+            self.module_spheres()
+        } else {
+            HashMap::new()
+        };
+        self.light_pass(&spheres);
         self.vigor_pass();
         self.develop(dt);
         self.shed();
+        if self.params.optimize_orientation {
+            self.optimize_orientations();
+        }
     }
 
     // --- 1. basipetal light accumulation ------------------------------------
-    // Q(u) = Q(u_m) + Q(u_l): a module's accumulated flux is its own local light
-    // plus the sum of its children's accumulated flux. Post-order over the tree.
-    fn light_pass(&mut self) {
+    // Local light Q(u) = exp(−scale·f_collisions(u)) (Eq. 1, =1 when disabled),
+    // then Q_acc(u) = Q(u) + Σ Q_acc(child): accumulate flux tip-to-base.
+    fn light_pass(&mut self, spheres: &HashMap<ModuleId, BSphere>) {
+        // Local light per module.
+        if self.params.collision_light {
+            let scale = self.params.light_scale;
+            for id in self.alive_ids() {
+                let f = self.f_collisions(id, spheres);
+                self.module_mut(id).q_local = (-scale * f).exp();
+            }
+        } else {
+            for id in self.alive_ids() {
+                self.module_mut(id).q_local = 1.0;
+            }
+        }
+        // Basipetal accumulation.
         let order = self.post_order(self.root);
         for &id in &order {
             let m = self.module(id);
@@ -186,6 +237,26 @@ impl Plant {
             }
             self.module_mut(id).q_acc = acc;
         }
+    }
+
+    /// f_collisions(u): summed bounding-sphere intersection volume with all
+    /// other modules, excluding structurally adjacent ones (parent / children),
+    /// whose overlap is unavoidable (Eq. 1).
+    fn f_collisions(&self, id: ModuleId, spheres: &HashMap<ModuleId, BSphere>) -> f32 {
+        let su = match spheres.get(&id) {
+            Some(s) => *s,
+            None => return 0.0,
+        };
+        let parent = self.module(id).parent;
+        let kids: Vec<ModuleId> = self.module(id).children.iter().map(|(_, c)| *c).collect();
+        let mut sum = 0.0;
+        for (&w, &sw) in spheres {
+            if w == id || Some(w) == parent || kids.contains(&w) {
+                continue;
+            }
+            sum += sphere_intersection_volume(su, sw);
+        }
+        sum
     }
 
     // --- 2. acropetal vigor redistribution (Eq. 2) --------------------------
@@ -288,29 +359,50 @@ impl Plant {
     /// Create and attach a new module at terminal `term` of module `parent_id`.
     /// `init_vigor` seeds the new module's vigor so it survives the shedding
     /// pass in the step it is born (the next vigor pass recomputes it exactly).
+    /// The orientation is stored *relative to the parent*: the child's local
+    /// axis (+Y) maps to the terminal's local direction. The per-step
+    /// `optimize_orientations` relaxation then refines it.
     fn attach_child(&mut self, parent_id: ModuleId, term: usize, init_vigor: f32) {
         let parent = self.module(parent_id);
         let parent_proto = &self.protos[parent.proto];
-
-        // World position & direction of the parent terminal node.
-        let term_local_pos = parent_proto.nodes[term].pos;
         let term_local_dir = parent_proto.seg_dir_local(term);
-        let base_pos = parent.base_pos + parent.orientation * term_local_pos;
-        let world_dir = (parent.orientation * term_local_dir).normalize_or_zero();
 
         // Select prototype via morphospace (Voronoi-nearest to (λ, D')).
-        let parent_vigor = parent.vigor;
-        let d_prime = parent_vigor * self.params.determinacy / self.params.v_max;
+        let d_prime = parent.vigor * self.params.determinacy / self.params.v_max;
         let proto_idx = self.select_prototype(self.params.lambda, d_prime);
 
-        // Orient the child so its local axis (+Y) aligns with the terminal's
-        // world direction.
-        let orientation = Quat::from_rotation_arc(Vec3::Y, world_dir);
-
-        let mut child = Module::new(proto_idx, Some(parent_id), orientation, base_pos);
+        let orientation = Quat::from_rotation_arc(Vec3::Y, term_local_dir);
+        let mut child = Module::new(proto_idx, Some(parent_id), orientation, Vec3::ZERO);
         child.vigor = init_vigor;
         let new_id = self.alloc(child);
         self.module_mut(parent_id).children.push((term, new_id));
+    }
+
+    /// Intersection-volume ratio (Fig. 15a validation metric): summed pairwise
+    /// non-adjacent intersection volume divided by total module sphere volume.
+    pub fn intersection_ratio(&self) -> f32 {
+        let spheres = self.module_spheres();
+        let ids: Vec<ModuleId> = spheres.keys().copied().collect();
+        let mut inter = 0.0;
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                let (a, b) = (ids[i], ids[j]);
+                let adj = self.module(a).parent == Some(b) || self.module(b).parent == Some(a);
+                if adj {
+                    continue;
+                }
+                inter += sphere_intersection_volume(spheres[&a], spheres[&b]);
+            }
+        }
+        let total: f32 = spheres
+            .values()
+            .map(|s| 4.0 / 3.0 * std::f32::consts::PI * s.radius.powi(3))
+            .sum();
+        if total > 0.0 {
+            inter / total
+        } else {
+            0.0
+        }
     }
 
     /// Morphospace selection: nearest prototype to the query point in (λ, D).
@@ -409,9 +501,9 @@ impl Plant {
 
     // --- geometry: derive a render skeleton ---------------------------------
     //
-    // Build a single global node graph spanning all modules (a child module's
-    // root node is the *same* point as the parent terminal it attaches to, so
-    // there is one continuous skeleton). For each node we compute:
+    // `place()` builds a single global node graph spanning all modules (a child
+    // module's root node is the *same* point as the parent terminal it attaches
+    // to, so there is one continuous skeleton). For each node we compute:
     //   * world position: parent + orientation·dir·ℓ + tropism offset, where
     //     ℓ = min(ℓmax, β·a_b) (Eq. 9) and a_b = max(0, a_u − a_n) (Eq. 7) gives
     //     acropetal (root-first) extension within the module;
@@ -422,30 +514,37 @@ impl Plant {
     // Because modules are visited parent-before-child and nodes parent-before-
     // child, every node's parent has a smaller global id — so a reverse-id sweep
     // is a valid post-order for the diameter accumulation.
-    pub fn skeleton(&self) -> Vec<Segment> {
+    fn place(&self) -> Placement {
         let p = &self.params;
         let mut pos: Vec<Vec3> = Vec::new();
         let mut parent: Vec<Option<usize>> = Vec::new();
         let mut children: Vec<Vec<usize>> = Vec::new();
+        let mut gid_module: Vec<ModuleId> = Vec::new();
         let mut module_root_gid: HashMap<ModuleId, usize> = HashMap::new();
+        // Module orientations are stored *relative to parent*; accumulate world
+        // orientation parent-before-child (pre-order guarantees the ordering).
+        let mut world_orient: HashMap<ModuleId, Quat> = HashMap::new();
+        let mut module_base: HashMap<ModuleId, Vec3> = HashMap::new();
 
         // Plant root node.
         pos.push(self.module(self.root).base_pos);
         parent.push(None);
         children.push(Vec::new());
+        gid_module.push(self.root);
         module_root_gid.insert(self.root, 0);
 
         for &mid in &self.pre_order(self.root) {
             let m = self.module(mid);
             let proto = &self.protos[m.proto];
             let au = m.age;
-            let max_depth = proto
-                .nodes
-                .iter()
-                .map(|n| n.depth)
-                .max()
-                .unwrap_or(1)
-                .max(1) as f32;
+            let max_depth = proto.nodes.iter().map(|n| n.depth).max().unwrap_or(1).max(1) as f32;
+
+            let w_orient = match m.parent {
+                None => m.orientation,
+                Some(par) => world_orient[&par] * m.orientation,
+            };
+            world_orient.insert(mid, w_orient);
+            module_base.insert(mid, pos[module_root_gid[&mid]]);
 
             let mut local_gid = vec![usize::MAX; proto.nodes.len()];
             local_gid[0] = module_root_gid[&mid];
@@ -459,7 +558,7 @@ impl Plant {
                 let a_b = (au - a_n).max(0.0);
                 let len = (p.beta * a_b).min(p.l_max);
 
-                let dir_world = (m.orientation * proto.seg_dir_local(ln)).normalize_or_zero();
+                let dir_world = (w_orient * proto.seg_dir_local(ln)).normalize_or_zero();
                 let tropism = if a_b > 1e-6 {
                     (p.g1 * p.g2 / (a_b + p.g1)) * Vec3::NEG_Y
                 } else {
@@ -471,6 +570,7 @@ impl Plant {
                 pos.push(node_pos);
                 parent.push(Some(base_gid));
                 children.push(Vec::new());
+                gid_module.push(mid);
                 children[base_gid].push(gid);
                 local_gid[ln] = gid;
             }
@@ -491,22 +591,180 @@ impl Plant {
             }
         }
 
+        Placement {
+            pos,
+            parent,
+            children,
+            gid_module,
+            diam,
+            world_orient,
+            module_base,
+        }
+    }
+
+    pub fn skeleton(&self) -> Vec<Segment> {
+        let pl = self.place();
         let mut segs = Vec::new();
-        for g in 0..n {
-            if let Some(pg) = parent[g] {
-                if (pos[g] - pos[pg]).length() < 1e-5 {
+        for g in 0..pl.pos.len() {
+            if let Some(pg) = pl.parent[g] {
+                if (pl.pos[g] - pl.pos[pg]).length() < 1e-5 {
                     continue;
                 }
                 segs.push(Segment {
-                    a: pos[pg],
-                    b: pos[g],
-                    ra: diam[pg] * 0.5,
-                    rb: diam[g] * 0.5,
+                    a: pl.pos[pg],
+                    b: pl.pos[g],
+                    ra: pl.diam[pg] * 0.5,
+                    rb: pl.diam[g] * 0.5,
                 });
             }
         }
         segs
     }
+
+    /// Spherical bounding volume B_u per module (Sec. 5.2.1): centre = centroid
+    /// of the module's node geometry, radius = enclosing radius (+ small margin).
+    /// Returns a map keyed by module id. Modules with no developed geometry yet
+    /// are given a small sphere at their attachment point.
+    pub fn module_spheres(&self) -> HashMap<ModuleId, BSphere> {
+        Self::spheres_from(&self.place())
+    }
+
+    fn spheres_from(pl: &Placement) -> HashMap<ModuleId, BSphere> {
+        let mut acc: HashMap<ModuleId, Vec<Vec3>> = HashMap::new();
+        for g in 0..pl.pos.len() {
+            acc.entry(pl.gid_module[g]).or_default().push(pl.pos[g]);
+        }
+        let mut out = HashMap::new();
+        for (mid, pts) in acc {
+            let centre = pts.iter().copied().fold(Vec3::ZERO, |a, b| a + b) / pts.len() as f32;
+            let radius = pts
+                .iter()
+                .map(|q| (*q - centre).length())
+                .fold(0.0f32, f32::max)
+                .max(0.05)
+                + 0.1;
+            out.insert(mid, BSphere { centre, radius });
+        }
+        out
+    }
+
+    /// Per-step orientation relaxation (Sec. 5.2.3, App. A.1). For every
+    /// non-root module, gradient-descend its orientation *relative to its
+    /// parent* to minimize f_distribution = ω1·f_collisions + ω2·f_tropism.
+    /// Running this once per step lets the crown progressively self-organize as
+    /// it grows (cf. the reorganizing trees of Fig. 11), driving the
+    /// intersection-volume ratio down (Fig. 15a).
+    fn optimize_orientations(&mut self) {
+        let p = self.params.clone();
+        let pl = self.place();
+        let spheres = Self::spheres_from(&pl);
+
+        // Compute all updates against the current placement, then apply (so the
+        // pass is a single synchronous relaxation step).
+        let mut updates: Vec<(ModuleId, Quat)> = Vec::new();
+        for mid in self.pre_order(self.root) {
+            let m = self.module(mid);
+            let par = match m.parent {
+                Some(par) => par,
+                None => continue, // root orientation is fixed (grows up)
+            };
+            let parent_world = pl.world_orient[&par];
+            let base = pl.module_base[&mid];
+            let proto = &self.protos[m.proto];
+            let local_c = proto.local_centroid();
+            let local_r = proto.local_radius();
+
+            // Exclusions: self, parent, and children (structurally adjacent).
+            let mut exclude: Vec<ModuleId> = vec![mid, par];
+            exclude.extend(m.children.iter().map(|(_, c)| *c));
+
+            let cost = |rel: Quat| -> f32 {
+                let w = parent_world * rel;
+                let sphere = BSphere {
+                    centre: base + w * local_c,
+                    radius: local_r,
+                };
+                let mut f_col = 0.0;
+                for (&o, &so) in &spheres {
+                    if exclude.contains(&o) {
+                        continue;
+                    }
+                    f_col += sphere_intersection_volume(sphere, so);
+                }
+                let axis = (w * Vec3::Y).normalize_or_zero();
+                let f_trop = (p.tropism_set_angle.cos() - axis.dot(Vec3::Y)).abs();
+                p.omega1 * f_col + p.omega2 * f_trop
+            };
+
+            let mut rel = m.orientation;
+            let mut best = cost(rel);
+            for _ in 0..p.opt_iters {
+                let candidates = [
+                    rel * Quat::from_rotation_x(p.opt_angle),
+                    rel * Quat::from_rotation_x(-p.opt_angle),
+                    rel * Quat::from_rotation_z(p.opt_angle),
+                    rel * Quat::from_rotation_z(-p.opt_angle),
+                ];
+                let mut improved = false;
+                for c in candidates {
+                    let cc = cost(c);
+                    if cc < best - 1e-6 {
+                        best = cc;
+                        rel = c;
+                        improved = true;
+                    }
+                }
+                if !improved {
+                    break;
+                }
+            }
+            updates.push((mid, rel));
+        }
+
+        for (mid, rel) in updates {
+            self.module_mut(mid).orientation = rel;
+        }
+    }
+}
+
+/// A bounding sphere for a module.
+#[derive(Clone, Copy, Debug)]
+pub struct BSphere {
+    pub centre: Vec3,
+    pub radius: f32,
+}
+
+/// Internal placement of the whole plant as a flat global node graph.
+struct Placement {
+    pos: Vec<Vec3>,
+    parent: Vec<Option<usize>>,
+    children: Vec<Vec<usize>>,
+    /// Module id that each global node belongs to.
+    gid_module: Vec<ModuleId>,
+    diam: Vec<f32>,
+    /// World-space orientation of each module (relative orientations composed).
+    world_orient: HashMap<ModuleId, Quat>,
+    /// World-space position of each module's root node.
+    module_base: HashMap<ModuleId, Vec3>,
+}
+
+/// Volume of the intersection (lens) of two spheres.
+pub fn sphere_intersection_volume(a: BSphere, b: BSphere) -> f32 {
+    let d = (a.centre - b.centre).length();
+    let (r1, r2) = (a.radius, b.radius);
+    if d >= r1 + r2 {
+        return 0.0;
+    }
+    if d <= (r1 - r2).abs() {
+        // One sphere contained in the other.
+        let r = r1.min(r2);
+        return 4.0 / 3.0 * std::f32::consts::PI * r * r * r;
+    }
+    // Standard sphere-sphere lens volume.
+    let sum = r1 + r2;
+    std::f32::consts::PI * (sum - d) * (sum - d)
+        * (d * d + 2.0 * d * sum - 3.0 * (r1 - r2) * (r1 - r2))
+        / (12.0 * d)
 }
 
 #[cfg(test)]
@@ -524,6 +782,14 @@ mod tests {
         plant
     }
 
+    fn grow_with(params: PlantParams, steps: u32) -> Plant {
+        let mut plant = Plant::new(default_library(), params, Vec3::ZERO);
+        for _ in 0..steps {
+            plant.step(1.0);
+        }
+        plant
+    }
+
     #[test]
     fn root_matures_and_branches() {
         let plant = grow(0.72, 6);
@@ -532,6 +798,42 @@ mod tests {
             plant.module_count() > 1,
             "expected branching, got {} modules",
             plant.module_count()
+        );
+    }
+
+    #[test]
+    fn orientation_optimization_reduces_collisions() {
+        // Sec. 5.2.3 / Fig. 15a: the environment-sensitive model must keep the
+        // module intersection-volume ratio far below the naive one (paper: <5%).
+        let naive = grow_with(
+            {
+                let mut p = PlantParams::default();
+                p.lambda = 0.5;
+                p
+            },
+            120,
+        )
+        .intersection_ratio();
+
+        let optimized = grow_with(
+            {
+                let mut p = PlantParams::default();
+                p.lambda = 0.5;
+                p.collision_light = true;
+                p.optimize_orientation = true;
+                p
+            },
+            120,
+        )
+        .intersection_ratio();
+
+        assert!(
+            optimized < naive,
+            "optimized ratio {optimized:.3} should be below naive {naive:.3}"
+        );
+        assert!(
+            optimized < 0.05,
+            "optimized ratio {optimized:.3} should be under the 5% target"
         );
     }
 
