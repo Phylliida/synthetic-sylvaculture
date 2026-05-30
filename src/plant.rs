@@ -78,6 +78,21 @@ pub struct PlantParams {
     pub opt_angle: f32,
     /// Number of gradient-descent steps per optimization (~3 per the paper).
     pub opt_iters: u32,
+    /// Under-relaxation factor in [0,1]: each step a module rotates only this
+    /// fraction of the way toward its optimized orientation. <1 damps the
+    /// simultaneous-update oscillation ("flicker") and converges to a fixed
+    /// point. 1.0 = undamped (greedy, oscillates).
+    pub opt_damping: f32,
+    /// Hard cap (radians) on how far a module may rotate in a single step.
+    pub opt_max_step: f32,
+    /// Minimum current collision volume for a module to bother reorienting.
+    /// Modules that aren't overlapping anything are left alone, so settled
+    /// structure stops moving (removes residual flicker).
+    pub opt_collision_eps: f32,
+    /// Freeze settled modules: skip orientation optimization for modules that
+    /// are mature or not currently colliding. This is what stops the crown
+    /// flickering; disable only to study the old perpetual-relaxation behavior.
+    pub opt_freeze_settled: bool,
 }
 
 impl Default for PlantParams {
@@ -106,6 +121,10 @@ impl Default for PlantParams {
             tropism_set_angle: 0.0,
             opt_angle: 0.4,
             opt_iters: 6,
+            opt_damping: 0.25,
+            opt_max_step: 0.2,
+            opt_collision_eps: 0.05,
+            opt_freeze_settled: true,
         }
     }
 }
@@ -629,6 +648,17 @@ impl Plant {
         Self::spheres_from(&self.place())
     }
 
+    /// Centroids of fully-mature modules only — these should be frozen, so any
+    /// per-step movement here is genuine flicker (not growth).
+    pub fn mature_centroids(&self) -> HashMap<ModuleId, Vec3> {
+        let am = self.params.a_mature;
+        self.module_spheres()
+            .into_iter()
+            .filter(|(id, _)| self.module(*id).age >= am)
+            .map(|(id, s)| (id, s.centre))
+            .collect()
+    }
+
     fn spheres_from(pl: &Placement) -> HashMap<ModuleId, BSphere> {
         let mut acc: HashMap<ModuleId, Vec<Vec3>> = HashMap::new();
         for g in 0..pl.pos.len() {
@@ -668,6 +698,13 @@ impl Plant {
                 Some(par) => par,
                 None => continue, // root orientation is fixed (grows up)
             };
+            // Only developing modules reorient (App. A.1 optimizes *new*
+            // modules). Once mature a module freezes, so settled structure
+            // stops moving — younger neighbours do the dodging. This is what
+            // keeps the crown from flickering every step.
+            if p.opt_freeze_settled && m.age >= p.a_mature {
+                continue;
+            }
             let parent_world = pl.world_orient[&par];
             let base = pl.module_base[&mid];
             let proto = &self.protos[m.proto];
@@ -677,6 +714,24 @@ impl Plant {
             // Exclusions: self, parent, and children (structurally adjacent).
             let mut exclude: Vec<ModuleId> = vec![mid, par];
             exclude.extend(m.children.iter().map(|(_, c)| *c));
+
+            // Skip modules that aren't actually colliding — there is nothing to
+            // resolve, so leave them put. This freezes spread-out tips and is
+            // what finally removes the flicker.
+            if p.opt_freeze_settled {
+                if let Some(&su) = spheres.get(&mid) {
+                    let mut cur = 0.0;
+                    for (&o, &so) in &spheres {
+                        if exclude.contains(&o) {
+                            continue;
+                        }
+                        cur += sphere_intersection_volume(su, so);
+                    }
+                    if cur < p.opt_collision_eps {
+                        continue;
+                    }
+                }
+            }
 
             let cost = |rel: Quat| -> f32 {
                 let w = parent_world * rel;
@@ -718,7 +773,20 @@ impl Plant {
                     break;
                 }
             }
-            updates.push((mid, rel));
+
+            // Under-relaxation: move only a fraction of the way toward the
+            // optimized orientation, capped at opt_max_step radians. This damps
+            // the simultaneous-update oscillation and lets the crown settle.
+            let current = m.orientation;
+            let target = rel.normalize();
+            let angle = current.angle_between(target);
+            let damped = if angle > 1e-5 {
+                let s = p.opt_damping.min(p.opt_max_step / angle).clamp(0.0, 1.0);
+                current.slerp(target, s)
+            } else {
+                current
+            };
+            updates.push((mid, damped));
         }
 
         for (mid, rel) in updates {
@@ -835,6 +903,32 @@ mod tests {
             optimized < 0.05,
             "optimized ratio {optimized:.3} should be under the 5% target"
         );
+    }
+
+    #[test]
+    fn settled_modules_do_not_flicker() {
+        // With the freeze/damping fix, mature modules in a crowded (bushy) crown
+        // must stop moving — no perpetual back-and-forth re-orientation.
+        let mut p = PlantParams::default();
+        p.lambda = 0.30;
+        p.collision_light = true;
+        p.optimize_orientation = true;
+        let mut plant = grow_with(p, 60);
+
+        let mut last = plant.mature_centroids();
+        let mut path = 0.0f32;
+        for _ in 0..20 {
+            plant.step(1.0);
+            let now = plant.mature_centroids();
+            for (id, p0) in &last {
+                if let Some(p1) = now.get(id) {
+                    path += (*p1 - *p0).length();
+                }
+            }
+            last = now;
+        }
+        let per = path / last.len().max(1) as f32;
+        assert!(per < 0.05, "settled modules still flicker: {per:.4} units/module");
     }
 
     #[test]

@@ -42,6 +42,49 @@ fn run_stats() {
         }
     }
 
+    println!("\nflicker: back-and-forth wiggle of mature modules (path−net over 30 steps), λ=0.30:");
+    for (label, committed) in [("committed", true), ("fixed", false)] {
+        let mut params = PlantParams::default();
+        params.lambda = 0.30;
+        params.collision_light = true;
+        params.optimize_orientation = true;
+        if committed {
+            // emulate the committed milestone-2 optimizer: undamped, no freeze.
+            params.opt_damping = 1.0;
+            params.opt_freeze_settled = false;
+        }
+        let mut plant = make_plant(params);
+        for _ in 0..60 {
+            plant.step(1.0);
+        }
+        let start = plant.mature_centroids();
+        let mut last = start.clone();
+        let mut path: std::collections::HashMap<usize, f32> = std::collections::HashMap::new();
+        for _ in 0..30 {
+            plant.step(1.0);
+            let now = plant.mature_centroids();
+            for (id, p0) in &last {
+                if let Some(p1) = now.get(id) {
+                    *path.entry(*id).or_insert(0.0) += (*p1 - *p0).length();
+                }
+            }
+            last = now;
+        }
+        // wiggle = path travelled minus net displacement (pure oscillation).
+        let mut wig = 0.0f32;
+        let mut n = 0u32;
+        for (id, &p) in &path {
+            if let (Some(s), Some(e)) = (start.get(id), last.get(id)) {
+                wig += p - (*e - *s).length();
+                n += 1;
+            }
+        }
+        println!(
+            "  {label:<9}  avg wiggle {:.4} units over 30 steps",
+            if n > 0 { wig / n as f32 } else { 0.0 }
+        );
+    }
+
     println!("\norientation optimization vs naive (Fig. 15a metric, λ=0.5, 120 steps):");
     for (label, opt) in [("naive", false), ("optimized", true)] {
         let mut params = PlantParams::default();
