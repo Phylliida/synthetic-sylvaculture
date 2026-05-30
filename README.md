@@ -43,7 +43,7 @@ Pipe Model yields a trunk thicker than its twigs. (See `cargo test`.)
   (the table's units differ from this model's scales)
 - Warm key + cool fill directional lights + ambient, lighter sky
 
-**Milestone 4 — ecosystem (in progress).**
+**Milestone 4 — ecosystem (done).**
 - Many mixed-species plants on flat ground, one combined per-species-coloured
   mesh; `./run.sh --eco`
 - Global shadow-propagation grid (Pałubicki / Sec. 6.2): downward pyramidal
@@ -52,8 +52,15 @@ Pipe Model yields a trunk thicker than its twigs. (See `cargo test`.)
 - Root vigor scales with captured light (`v_base = α·Q_base`, capped) → shaded
   plants are suppressed. Validated: global shadowing cuts total biomass ~36%
   via competition (`cargo run -- --stats`)
-- **Next:** flowering + Gaussian seeding (→ succession / gap dynamics) and
-  climatic adaptation (Eq. 11, temperature/precipitation → the nine biomes).
+- Flowering + seeding (Sec. 6.3): plants past flowering age scatter seeds of
+  their species nearby; senescence (p_max) + culling open gaps → **succession
+  and gap dynamics** (pioneer shrubs boom, then yield to longer-lived species)
+- Climatic adaptation (Sec. 6.4, Eq. 11): temperature/precipitation scale each
+  species' growth + seeding via a Gaussian niche → **biome composition** (cold →
+  shrub tundra, temperate → poplar forest, warm/wet → oak). ←/→/↑/↓ set the
+  climate; a Whittaker-style label names the biome
+- Validated in `--stats`: shadowing −65% biomass, succession over 360 steps,
+  biome dominants across three climates. 10 tests pass.
 
 ## Running
 

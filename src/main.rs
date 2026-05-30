@@ -14,7 +14,7 @@ mod plant;
 mod prototype;
 mod species;
 
-use ecosystem::Ecosystem;
+use ecosystem::{biome_name, Climate, Ecosystem};
 use glam::vec3 as gvec3;
 use plant::{Plant, PlantParams};
 use three_d::*;
@@ -74,25 +74,76 @@ fn run_stats() {
         }
     }
 
+    let temperate = Climate { temp: 10.0, precip: 90.0 };
+
     println!("\necosystem: global shadowing on vs off (40 plants on a 26×26 plot, 140 steps):");
     for shadow in [false, true] {
-        let mut eco = Ecosystem::new(40, 13.0, 7);
-        let steps = 140;
+        let mut eco = Ecosystem::new(40, 13.0, 7, temperate);
         eco.shadow_enabled = shadow;
-        for _ in 0..steps {
+        for _ in 0..140 {
             eco.step(1.0);
         }
         let mut h = eco.plant_heights();
         h.sort_by(f32::total_cmp);
         let med = h[h.len() / 2];
-        let suppressed = h.iter().filter(|&&x| x < 2.0).count();
         println!(
-            "  shadow {:<3}  total modules {:>5}  median height {:.1}  tallest {:.1}  suppressed(<2m) {}",
+            "  shadow {:<3}  plants {:>3}  total modules {:>5}  median height {:.1}  tallest {:.1}",
             if shadow { "on" } else { "off" },
+            eco.plant_count(),
             eco.total_modules(),
             med,
             h.last().copied().unwrap_or(0.0),
-            suppressed
+        );
+    }
+
+    let names: Vec<&str> = Ecosystem::new(0, 1.0, 0, temperate)
+        .species
+        .iter()
+        .map(|s| s.name)
+        .collect();
+
+    println!("\necosystem: succession (temperate, species counts over time):");
+    {
+        let mut eco = Ecosystem::new(30, 13.0, 4, temperate);
+        for s in 1..=360 {
+            eco.step(1.0);
+            if [60, 150, 260, 360].contains(&s) {
+                let counts = eco.species_counts();
+                let comp: Vec<String> = counts
+                    .iter()
+                    .zip(&names)
+                    .filter(|(c, _)| **c > 0)
+                    .map(|(c, n)| format!("{n}:{c}"))
+                    .collect();
+                println!("  step {s:>3}  plants {:>3}  [{}]", eco.plant_count(), comp.join(", "));
+            }
+        }
+    }
+
+    println!("\necosystem: biome composition across climates (180 steps each):");
+    for clim in [
+        Climate { temp: -3.0, precip: 60.0 },
+        Climate { temp: 10.0, precip: 90.0 },
+        Climate { temp: 24.0, precip: 200.0 },
+    ] {
+        let mut eco = Ecosystem::new(36, 13.0, 9, clim);
+        for _ in 0..180 {
+            eco.step(1.0);
+        }
+        let counts = eco.species_counts();
+        let dom = counts
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, c)| **c)
+            .map(|(i, _)| names[i])
+            .unwrap_or("none");
+        println!(
+            "  T={:>4.0}°C P={:>3.0}cm  {:<28}  plants {:>3}  dominant: {}",
+            clim.temp,
+            clim.precip,
+            biome_name(clim.temp, clim.precip),
+            eco.plant_count(),
+            dom
         );
     }
 
@@ -203,7 +254,8 @@ fn run_ecosystem() {
     let eco_size = 14.0f32;
     let plant_count = 40;
     let mut seed = 7u64;
-    let mut eco = Ecosystem::new(plant_count, eco_size, seed);
+    let mut climate = Climate { temp: 10.0, precip: 90.0 };
+    let mut eco = Ecosystem::new(plant_count, eco_size, seed, climate);
 
     let mut ground = Gm::new(
         Mesh::new(&context, &CpuMesh::square()),
@@ -248,7 +300,13 @@ fn run_ecosystem() {
 
     println!("Synthetic Sylvaculture — Ecosystem");
     println!("  Space play/pause · S step · R reseed · F foliage · mouse orbit/zoom");
-    println!("  {} plants on a {}×{} ground", eco.plant_count(), (eco_size * 2.0) as i32, (eco_size * 2.0) as i32);
+    println!("  ←/→ temperature · ↑/↓ precipitation (reseeds the biome)");
+    println!(
+        "  climate: {:.0}°C, {:.0}cm  →  {}",
+        climate.temp,
+        climate.precip,
+        biome_name(climate.temp, climate.precip)
+    );
 
     window.render_loop(move |mut frame_input| {
         camera.set_viewport(frame_input.viewport);
@@ -269,6 +327,22 @@ fn run_ecosystem() {
                     Key::F => {
                         show_foliage = !show_foliage;
                     }
+                    Key::ArrowLeft => {
+                        climate.temp = (climate.temp - 2.0).clamp(-10.0, 30.0);
+                        reset = true;
+                    }
+                    Key::ArrowRight => {
+                        climate.temp = (climate.temp + 2.0).clamp(-10.0, 30.0);
+                        reset = true;
+                    }
+                    Key::ArrowDown => {
+                        climate.precip = (climate.precip - 15.0).clamp(10.0, 400.0);
+                        reset = true;
+                    }
+                    Key::ArrowUp => {
+                        climate.precip = (climate.precip + 15.0).clamp(10.0, 400.0);
+                        reset = true;
+                    }
                     _ => {}
                 }
             }
@@ -276,11 +350,16 @@ fn run_ecosystem() {
 
         if reset {
             seed += 1;
-            eco = Ecosystem::new(plant_count, eco_size, seed);
+            eco = Ecosystem::new(plant_count, eco_size, seed, climate);
             step_count = 0;
             accum_ms = 0.0;
             dirty = true;
-            println!("[reseed {seed}]");
+            println!(
+                "[reseed] {:.0}°C, {:.0}cm → {}",
+                climate.temp,
+                climate.precip,
+                biome_name(climate.temp, climate.precip)
+            );
         }
 
         if playing {
