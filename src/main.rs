@@ -634,9 +634,6 @@ fn main() {
     let mut sp_idx = 2usize; // birch
     let mut params = species[sp_idx].params.clone();
 
-    let mut bark = make_bark(&context, species[sp_idx].bark_rgb);
-    let mut leaf_mat = make_leaf(&context, species[sp_idx].leaf_rgb);
-
     let leaf_size = 0.38;
     let leaves_per_cluster = 5;
     let mut show_foliage = true;
@@ -645,14 +642,14 @@ fn main() {
     let mut plant = make_plant(params.clone());
     let mut tree = Gm::new(
         Mesh::new(&context, &mesh::build_tree_mesh(&plant.skeleton(), 8)),
-        bark.clone(),
+        make_bark(&context, species[sp_idx].bark_rgb),
     );
     let mut foliage = Gm::new(
         Mesh::new(
             &context,
             &mesh::build_foliage_mesh(&plant.leaves(), leaf_size, leaves_per_cluster),
         ),
-        leaf_mat.clone(),
+        make_leaf(&context, species[sp_idx].leaf_rgb),
     );
 
     let mut playing = true;
@@ -725,10 +722,8 @@ fn main() {
                     Key::N => {
                         sp_idx = (sp_idx + 1) % species.len();
                         params = species[sp_idx].params.clone();
-                        bark = make_bark(&context, species[sp_idx].bark_rgb);
-                        leaf_mat = make_leaf(&context, species[sp_idx].leaf_rgb);
-                        tree.material = bark.clone();
-                        foliage.material = leaf_mat.clone();
+                        tree.material = make_bark(&context, species[sp_idx].bark_rgb);
+                        foliage.material = make_leaf(&context, species[sp_idx].leaf_rgb);
                         reset = true;
                         println!("[species] {}", species[sp_idx].name);
                     }

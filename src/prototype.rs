@@ -26,7 +26,6 @@ pub struct ProtoNode {
 
 #[derive(Clone, Debug)]
 pub struct Prototype {
-    pub name: &'static str,
     /// nodes[0] is always the root (parent == None).
     pub nodes: Vec<ProtoNode>,
     /// Terminal node indices. By convention `terminals[0]` is the *apical*
@@ -45,17 +44,6 @@ impl Prototype {
         let n = &self.nodes[child];
         let p = n.parent.expect("segment child must have a parent");
         (self.nodes[child].pos - self.nodes[p].pos).normalize_or_zero()
-    }
-
-    /// Mature (rest) length of the segment ending at `child`.
-    pub fn seg_restlen(&self, child: usize) -> f32 {
-        let n = &self.nodes[child];
-        let p = n.parent.expect("segment child must have a parent");
-        (self.nodes[child].pos - self.nodes[p].pos).length()
-    }
-
-    pub fn is_terminal(&self, node: usize) -> bool {
-        self.terminals.contains(&node)
     }
 
     /// Centroid of the mature local node layout (module-local frame). Used to
@@ -80,7 +68,6 @@ impl Prototype {
 /// Helper to build a prototype from a flat list of (position, parent) pairs and
 /// an explicit terminal list. Depths are derived from the parent chain.
 fn build(
-    name: &'static str,
     lambda: f32,
     determinacy: f32,
     raw: &[(Vec3, Option<usize>)],
@@ -103,7 +90,6 @@ fn build(
         };
     }
     Prototype {
-        name,
         nodes,
         terminals,
         lambda,
@@ -122,7 +108,7 @@ fn build(
 /// apical chain into a banana/loop — so the excurrent-vs-decurrent habit is
 /// expressed through the vigor split (λ) and lateral spread, not by slanting
 /// the leader. Laterals are spread in azimuth for a 3D crown.
-fn make_proto(name: &'static str, lambda: f32, d: f32) -> Prototype {
+fn make_proto(lambda: f32, d: f32) -> Prototype {
     use glam::vec3;
     use std::f32::consts::TAU;
 
@@ -153,25 +139,20 @@ fn make_proto(name: &'static str, lambda: f32, d: f32) -> Prototype {
         terminals.push(raw.len() - 1);
     }
 
-    build(name, lambda, d, &raw, terminals)
+    build(lambda, d, &raw, terminals)
 }
 
 /// The default prototype library: nine prototypes on a (λ, D) grid spanning the
-/// morphospace. A vigorous parent (high D′) selects monopodial modules; a weak
-/// one selects sympodial — giving intra-tree variation as well as species
-/// variation via the plant's λ.
+/// morphospace. A vigorous parent (high D′) selects high-determinacy modules; a
+/// weak one selects bushier low-determinacy ones — giving intra-tree variation
+/// as well as species variation via the plant's λ.
 pub fn default_library() -> Vec<Prototype> {
-    const NAMES: [&str; 9] = [
-        "sympodial-wide", "forked-wide", "monopodial-wide",
-        "sympodial-mid", "forked-mid", "monopodial-mid",
-        "sympodial-narrow", "forked-narrow", "monopodial-narrow",
-    ];
     let lambdas = [0.25f32, 0.55, 0.85];
     let ds = [0.25f32, 0.55, 0.85];
     let mut out = Vec::with_capacity(9);
-    for (li, &lam) in lambdas.iter().enumerate() {
-        for (di, &dd) in ds.iter().enumerate() {
-            out.push(make_proto(NAMES[li * 3 + di], lam, dd));
+    for &lam in &lambdas {
+        for &dd in &ds {
+            out.push(make_proto(lam, dd));
         }
     }
     out

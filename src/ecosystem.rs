@@ -151,7 +151,7 @@ pub fn biome_name(t: f32, p: f32) -> &'static str {
 impl Ecosystem {
     pub fn new(n: usize, size: f32, seed: u64, climate: Climate) -> Self {
         let species = species::library();
-        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let rng = ChaCha8Rng::seed_from_u64(seed);
         let mut eco = Ecosystem {
             species,
             plants: Vec::new(),

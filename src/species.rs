@@ -25,8 +25,6 @@ pub struct Species {
     pub seed_radius: f32,
     /// Per-plant per-step seeding probability (before climate scaling).
     pub seed_freq: f32,
-    /// Lifespan: senescence onset (p_max); fully senesced ≈ 2·max_age.
-    pub max_age: f32,
 }
 
 impl Species {
@@ -90,7 +88,7 @@ fn species(
     max_age: f32,
 ) -> Species {
     let mut params = params;
-    params.p_max = max_age; // senescence onset
+    params.p_max = max_age; // senescence onset (fully senesced ≈ 2·max_age)
     Species {
         name,
         params,
@@ -103,7 +101,6 @@ fn species(
         flowering_age,
         seed_radius,
         seed_freq,
-        max_age,
     }
 }
 

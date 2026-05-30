@@ -654,7 +654,6 @@ impl Plant {
         Placement {
             pos,
             parent,
-            children,
             gid_module,
             diam,
             world_orient,
@@ -875,7 +874,6 @@ pub struct BSphere {
 struct Placement {
     pos: Vec<Vec3>,
     parent: Vec<Option<usize>>,
-    children: Vec<Vec<usize>>,
     /// Module id that each global node belongs to.
     gid_module: Vec<ModuleId>,
     diam: Vec<f32>,
