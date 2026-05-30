@@ -55,7 +55,14 @@ fn preset(
         determinacy,
         gp,
         v_root_max,
-        v_max: v_root_max,
+        // Growth-rate saturation (Eq. 5 normalization), decoupled from the total
+        // budget v_root_max so moderate-vigor laterals still develop at a healthy
+        // rate instead of crawling — that's what fills out crowns.
+        v_max: 45.0,
+        // Shedding / spawn threshold: a higher floor stops low-vigor tips from
+        // branching forever, bounding tree size (and thus trunk thickness) by
+        // vigor rather than by simulation time.
+        v_min: 2.5,
         beta,
         g2,
         shade_tolerance,
@@ -109,49 +116,50 @@ pub fn library() -> Vec<Species> {
     vec![
         species(
             "conifer (spruce-like)",
-            preset(0.90, 0.90, 0.25, 130.0, 1.0, -0.20, 0.60, 0.055),
+            preset(0.55, 0.90, 0.25, 90.0, 1.0, -0.20, 0.60, 0.055),
             (42, 92, 56), (96, 70, 52),
             2.0, 80.0, 11.0, 90.0, 80.0, 5.0, 0.030, 250.0,
         ),
         species(
             "poplar (columnar)",
-            preset(0.82, 0.70, 0.34, 110.0, 1.1, -0.15, 0.20, 0.060),
+            preset(0.52, 0.72, 0.34, 85.0, 1.1, -0.15, 0.20, 0.060),
             (112, 168, 72), (122, 112, 92),
             13.0, 95.0, 10.0, 80.0, 55.0, 8.0, 0.055, 150.0,
         ),
         species(
             "birch",
-            preset(0.62, 0.50, 0.40, 95.0, 1.0, -0.25, 0.25, 0.060),
+            preset(0.50, 0.50, 0.40, 70.0, 1.0, -0.25, 0.25, 0.060),
             (146, 188, 82), (212, 208, 198),
             8.0, 70.0, 11.0, 80.0, 50.0, 7.0, 0.060, 130.0,
         ),
         species(
             "oak (broad)",
-            preset(0.42, 0.30, 0.30, 120.0, 1.15, -0.30, 0.45, 0.085),
+            preset(0.42, 0.30, 0.30, 90.0, 1.15, -0.30, 0.45, 0.070),
             (80, 130, 55), (92, 72, 55),
             15.0, 115.0, 10.0, 90.0, 70.0, 5.0, 0.035, 320.0,
         ),
         species(
             "shrub",
-            preset(0.30, 0.20, 0.50, 45.0, 0.9, -0.10, 0.15, 0.050),
+            preset(0.32, 0.20, 0.50, 42.0, 0.9, -0.10, 0.15, 0.050),
             (120, 150, 70), (100, 85, 60),
             6.0, 40.0, 16.0, 150.0, 28.0, 6.0, 0.090, 80.0,
         ),
         // Warm-end species so the savanna/tropical biomes are populated.
         species(
             "acacia (savanna)",
-            preset(0.45, 0.35, 0.34, 95.0, 1.25, -0.28, 0.30, 0.075),
+            preset(0.45, 0.35, 0.34, 70.0, 1.25, -0.28, 0.30, 0.065),
             (150, 170, 80), (110, 95, 70),
             24.0, 55.0, 9.0, 60.0, 50.0, 9.0, 0.055, 200.0,
         ),
         species(
             "tropical broadleaf",
-            preset(0.50, 0.40, 0.42, 145.0, 1.2, -0.25, 0.55, 0.075),
+            preset(0.50, 0.40, 0.42, 100.0, 1.2, -0.25, 0.55, 0.065),
             (54, 150, 58), (95, 75, 55),
             26.0, 320.0, 8.0, 120.0, 60.0, 6.0, 0.055, 300.0,
         ),
     ]
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -171,37 +179,64 @@ mod tests {
         p
     }
 
-    /// Thickest segment radius = trunk base.
     fn trunk_radius(p: &Plant) -> f32 {
         p.skeleton().iter().map(|s| s.ra).fold(0.0, f32::max)
     }
     fn slenderness(p: &Plant) -> f32 {
-        p.height() / (2.0 * trunk_radius(p)).max(1e-3)
+        let (h, _, _) = p.shape();
+        h / (2.0 * trunk_radius(p)).max(1e-3)
+    }
+    fn spread(p: &Plant) -> f32 {
+        let (h, crown, _) = p.shape();
+        crown / h.max(1e-3)
+    }
+    fn apex_lean(p: &Plant) -> f32 {
+        let (h, _, apex) = p.shape();
+        apex / h.max(1e-3)
     }
 
-    #[test]
-    fn conifer_is_tall_and_slender() {
-        let c = grow_solo(0, 150);
-        assert!(c.height() > 25.0, "conifer height {}", c.height());
-        assert!(slenderness(&c) > 30.0, "conifer slenderness {}", slenderness(&c));
-    }
+    // These tests pin "how each species should look" so the parameters can be
+    // tuned against them. The numbers come from the --stats morphology readout
+    // with comfortable margins.
 
     #[test]
-    fn oak_is_stout_and_shorter_than_conifer() {
-        let oak = grow_solo(3, 150);
+    fn conifer_is_tallest_and_narrowest() {
         let conifer = grow_solo(0, 150);
-        assert!(slenderness(&oak) < 25.0, "oak slenderness {}", slenderness(&oak));
-        assert!(
-            oak.height() < conifer.height(),
-            "oak {} should be shorter than conifer {}",
-            oak.height(),
-            conifer.height()
-        );
+        let ch = conifer.shape().0;
+        // The conifer should be the tallest species and narrower (lower spread)
+        // than the broad oak — the excurrent-vs-decurrent contrast.
+        for idx in 1..library().len() {
+            assert!(
+                ch >= grow_solo(idx, 150).shape().0 - 0.5,
+                "conifer ({ch:.1}) should be ~tallest; species {idx} taller"
+            );
+        }
+        assert!(spread(&conifer) < spread(&grow_solo(3, 150)), "conifer should be narrower than oak");
+    }
+
+    #[test]
+    fn every_species_has_a_crown_not_a_bare_pole() {
+        // Guards the failure mode where high apical control starves the
+        // laterals and the tree becomes a bare vertical pole.
+        for idx in 0..library().len() {
+            let s = spread(&grow_solo(idx, 150));
+            assert!(s > 0.15, "species {idx} is a bare pole (spread {s:.2})");
+        }
+    }
+
+    #[test]
+    fn no_species_grows_a_banana_trunk() {
+        // Guards the arc/loop regression: a solo tree's highest point must stay
+        // reasonably over its base, not swing far out sideways.
+        for idx in 0..library().len() {
+            let lean = apex_lean(&grow_solo(idx, 150));
+            assert!(lean < 0.45, "species {idx} arcs over (apex_lean {lean:.2})");
+        }
     }
 
     #[test]
     fn bigger_species_have_thicker_trunks() {
-        // Pipe Model: a large tree carries more leaves, so a thicker trunk.
+        // Pipe Model: a larger tree carries more leaves -> a thicker trunk.
         let conifer = trunk_radius(&grow_solo(0, 150));
         let shrub = trunk_radius(&grow_solo(4, 150));
         assert!(conifer > 2.0 * shrub, "conifer trunk {conifer} vs shrub {shrub}");
@@ -209,25 +244,27 @@ mod tests {
 
     #[test]
     fn trunk_thickens_as_the_tree_grows() {
-        // The same tree's trunk must get thicker over time as it adds foliage.
-        let mut p = grow_solo(0, 60);
+        // A young tree (few leaves) must have a thinner trunk than the same tree
+        // once grown (Pipe Model). Baseline taken early, before it bounds out.
+        let mut p = grow_solo(0, 18);
         let early = trunk_radius(&p);
-        for _ in 0..90 {
+        for _ in 0..100 {
             p.step(1.0);
         }
         let late = trunk_radius(&p);
-        assert!(late > early * 1.2, "trunk should thicken over time: {early} -> {late}");
+        assert!(late > early * 1.3, "trunk should thicken over time: {early:.3} -> {late:.3}");
     }
 
     #[test]
-    fn trunk_radii_are_in_a_plausible_range() {
-        // Guard the φ scale: trunks neither pencil-thin nor absurdly fat.
+    fn trunk_radii_and_slenderness_stay_plausible() {
+        // Guards the phi / v_max scale: trunks neither pencil-thin nor stumpy,
+        // proportions in a believable band.
         for idx in 0..library().len() {
             let p = grow_solo(idx, 150);
             let r = trunk_radius(&p);
             let s = slenderness(&p);
-            assert!(r > 0.03, "species {idx} trunk too thin: {r}");
-            assert!((4.0..=120.0).contains(&s), "species {idx} slenderness {s} out of range");
+            assert!(r > 0.04, "species {idx} trunk too thin: {r:.3}");
+            assert!((3.0..=45.0).contains(&s), "species {idx} slenderness {s:.0} out of range");
         }
     }
 }

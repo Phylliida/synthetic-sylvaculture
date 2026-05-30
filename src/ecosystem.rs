@@ -376,6 +376,28 @@ mod tests {
     }
 
     #[test]
+    fn forest_canopy_stays_upright() {
+        // Regression for the banana/loop bug: in a grown stand the tall plants
+        // must rise roughly over their bases, not arc over. apex_lean is the
+        // highest node's horizontal offset / height.
+        let mut eco = Ecosystem::new(40, 14.0, 7, Climate { temp: 5.0, precip: 80.0 });
+        for _ in 0..160 {
+            eco.step(1.0);
+        }
+        let leans: Vec<f32> = eco
+            .plants
+            .iter()
+            .filter_map(|p| {
+                let (h, _, apex) = p.shape();
+                (h > 6.0).then_some(apex / h)
+            })
+            .collect();
+        assert!(!leans.is_empty(), "expected some tall plants");
+        let mean = leans.iter().sum::<f32>() / leans.len() as f32;
+        assert!(mean < 0.25, "forest canopy is arcing over: mean apex_lean {mean:.2}");
+    }
+
+    #[test]
     fn shadowing_suppresses_total_biomass() {
         let climate = Climate { temp: 10.0, precip: 90.0 };
         let mut lit = Ecosystem::new(40, 13.0, 7, climate);

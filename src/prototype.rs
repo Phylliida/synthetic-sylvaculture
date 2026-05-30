@@ -112,16 +112,19 @@ fn build(
 }
 
 /// Parametric module prototype. Geometry is derived from the morphospace
-/// coordinates so the nine prototypes vary continuously:
-///   * apical control `lambda` sets the branching angle (high λ → narrow,
-///     excurrent; low λ → wide, decurrent);
-///   * determinacy `d` sets the topology (high D → monopodial: a straight
-///     apical continuation plus laterals; low D → sympodial: equal slanted
-///     forks with no dominant axis).
-/// Laterals are spread in azimuth for a 3D crown.
+/// coordinates:
+///   * apical control `lambda` sets the lateral branching angle (high λ →
+///     narrow, excurrent; low λ → wide, decurrent);
+///   * determinacy `d` sets the number of laterals (low D → more, bushier).
+///
+/// Crucially, the apical (leading) terminal is ALWAYS exactly vertical. Any
+/// consistent sideways tilt of the leading terminal compounds over a long
+/// apical chain into a banana/loop — so the excurrent-vs-decurrent habit is
+/// expressed through the vigor split (λ) and lateral spread, not by slanting
+/// the leader. Laterals are spread in azimuth for a 3D crown.
 fn make_proto(name: &'static str, lambda: f32, d: f32) -> Prototype {
     use glam::vec3;
-    use std::f32::consts::{PI, TAU};
+    use std::f32::consts::TAU;
 
     let internode = 0.8;
     let blen = 0.85;
@@ -132,28 +135,22 @@ fn make_proto(name: &'static str, lambda: f32, d: f32) -> Prototype {
     };
 
     let mut raw: Vec<(Vec3, Option<usize>)> = vec![
-        (vec3(0.0, 0.0, 0.0), None),  // 0 root
-        (top, Some(0)),               // 1 internode top
+        (vec3(0.0, 0.0, 0.0), None), // 0 root
+        (top, Some(0)),              // 1 internode top
     ];
     let mut terminals = Vec::new();
 
-    if d >= 0.45 {
-        // Monopodial: straight apical continuation + two opposed laterals.
-        raw.push((top + vec3(0.04, 0.9, 0.0), Some(1)));
-        terminals.push(raw.len() - 1); // apical first
-        for phi in [0.0, PI] {
-            raw.push((lateral(phi), Some(1)));
-            terminals.push(raw.len() - 1);
-        }
-    } else {
-        // Sympodial: equal slanted forks, no dominant axis (more forks when D
-        // is very low). terminals[0] is nominally apical but is itself slanted.
-        let n = if d < 0.3 { 3 } else { 2 };
-        for k in 0..n {
-            let phi = TAU * k as f32 / n as f32;
-            raw.push((lateral(phi), Some(1)));
-            terminals.push(raw.len() - 1);
-        }
+    // Apical terminal: straight up, always (terminals[0] is apical).
+    raw.push((top + vec3(0.0, 0.9, 0.0), Some(1)));
+    terminals.push(raw.len() - 1);
+
+    // Laterals spread around the axis; low determinacy → more of them. A few
+    // laterals per module give fuller crowns (whorls along the trunk).
+    let n_lat = if d < 0.4 { 4 } else { 3 };
+    for k in 0..n_lat {
+        let phi = TAU * k as f32 / n_lat as f32;
+        raw.push((lateral(phi), Some(1)));
+        terminals.push(raw.len() - 1);
     }
 
     build(name, lambda, d, &raw, terminals)

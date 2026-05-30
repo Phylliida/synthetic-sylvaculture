@@ -156,15 +156,37 @@ fn run_stats() {
         }
         let segs = plant.skeleton();
         let basal = segs.iter().map(|s| s.ra).fold(0.0, f32::max);
-        let h = plant.height();
+        let (h, crown, apex) = plant.shape();
         println!(
-            "  {:<22} modules {:>3}  height {:5.1}  trunk_radius {:.3}  slenderness(h/d) {:>4.0}",
+            "  {:<22} mod {:>3}  h {:5.1}  trunk_r {:.3}  slender {:>4.0}  spread {:.2}  apex_lean {:.2}",
             sp.name,
             plant.module_count(),
             h,
             basal,
             h / (2.0 * basal).max(1e-3),
+            crown / h.max(1e-3),
+            apex / h.max(1e-3),
         );
+    }
+
+    println!("\nforest arc (boreal stand, 160 steps) — apex-lean of tall plants (lower = straighter):");
+    {
+        let mut eco = Ecosystem::new(40, 14.0, 7, Climate { temp: 5.0, precip: 80.0 });
+        for _ in 0..160 {
+            eco.step(1.0);
+        }
+        let leans: Vec<f32> = eco
+            .plants
+            .iter()
+            .filter_map(|p| {
+                let (h, _, apex) = p.shape();
+                (h > 6.0).then_some(apex / h)
+            })
+            .collect();
+        let n = leans.len().max(1);
+        let mean = leans.iter().sum::<f32>() / n as f32;
+        let max = leans.iter().cloned().fold(0.0, f32::max);
+        println!("  tall plants {}  mean apex_lean {:.2}  max {:.2}", leans.len(), mean, max);
     }
 
     println!("\nspecies presets (100 steps each):");
@@ -225,10 +247,15 @@ fn run_stats() {
         );
     }
 
-    println!("\norientation optimization vs naive (Fig. 15a metric, λ=0.5, 120 steps):");
+    println!("\norientation optimization vs naive (Fig. 15a metric, dense crown, 120 steps):");
     for (label, opt) in [("naive", false), ("optimized", true)] {
+        // A deliberately dense, bushy crown (short segments, many modules) so
+        // there are real collisions for the optimizer to resolve.
         let mut params = PlantParams::default();
         params.lambda = 0.5;
+        params.l_max = 0.6;
+        params.v_root_max = 120.0;
+        params.v_max = 28.0;
         params.collision_light = opt;
         params.optimize_orientation = opt;
         let mut plant = make_plant(params);

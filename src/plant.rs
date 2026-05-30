@@ -412,7 +412,7 @@ impl Plant {
         let term_local_dir = parent_proto.seg_dir_local(term);
 
         // Select prototype via morphospace (Voronoi-nearest to (λ, D')).
-        let d_prime = parent.vigor * self.params.determinacy / self.params.v_max;
+        let d_prime = parent.vigor * self.params.determinacy / self.params.v_root_max;
         let proto_idx = self.select_prototype(self.params.lambda, d_prime);
 
         let orientation = Quat::from_rotation_arc(Vec3::Y, term_local_dir);
@@ -530,6 +530,33 @@ impl Plant {
             .iter()
             .map(|s| s.b.y.max(s.a.y))
             .fold(0.0, f32::max)
+    }
+
+    /// Shape metrics about the plant's local origin (assumed at its base):
+    /// `(height, crown_radius, apex_offset)` where crown_radius is the max
+    /// horizontal reach of any node and apex_offset is the horizontal distance
+    /// of the highest node from the trunk axis (a measure of how much the
+    /// leading shoot leans/arcs over rather than rising straight).
+    pub fn shape(&self) -> (f32, f32, f32) {
+        let base = self.origin;
+        let mut height = 0.0f32;
+        let mut crown_radius = 0.0f32;
+        let mut best_y = f32::MIN;
+        let mut apex_offset = 0.0f32;
+        for s in self.skeleton() {
+            for p in [s.a, s.b] {
+                let dx = p.x - base.x;
+                let dz = p.z - base.z;
+                let horiz = (dx * dx + dz * dz).sqrt();
+                height = height.max(p.y - base.y);
+                crown_radius = crown_radius.max(horiz);
+                if p.y > best_y {
+                    best_y = p.y;
+                    apex_offset = horiz;
+                }
+            }
+        }
+        (height, crown_radius, apex_offset)
     }
 
     // --- geometry: derive a render skeleton ---------------------------------
@@ -929,37 +956,30 @@ mod tests {
 
     #[test]
     fn orientation_optimization_reduces_collisions() {
-        // Sec. 5.2.3 / Fig. 15a: the environment-sensitive model must keep the
-        // module intersection-volume ratio far below the naive one (paper: <5%).
-        let naive = grow_with(
-            {
-                let mut p = PlantParams::default();
-                p.lambda = 0.5;
-                p
-            },
-            120,
-        )
-        .intersection_ratio();
-
-        let optimized = grow_with(
-            {
-                let mut p = PlantParams::default();
-                p.lambda = 0.5;
-                p.collision_light = true;
-                p.optimize_orientation = true;
-                p
-            },
-            120,
-        )
-        .intersection_ratio();
+        // Sec. 5.2.3 / Fig. 15a: the environment-sensitive model must reduce the
+        // module intersection-volume ratio relative to the naive one. Measured
+        // in a deliberately dense, bushy crown (short segments, many modules) so
+        // there are real collisions to resolve.
+        let dense = |optimize: bool| {
+            let mut p = PlantParams::default();
+            p.lambda = 0.5;
+            p.l_max = 0.6;
+            p.v_root_max = 120.0;
+            p.v_max = 28.0;
+            p.collision_light = optimize;
+            p.optimize_orientation = optimize;
+            grow_with(p, 120).intersection_ratio()
+        };
+        let naive = dense(false);
+        let optimized = dense(true);
 
         assert!(
-            optimized < naive,
-            "optimized ratio {optimized:.3} should be below naive {naive:.3}"
+            optimized < 0.75 * naive,
+            "optimization should clearly cut overlap: naive {naive:.3} -> optimized {optimized:.3}"
         );
         assert!(
             optimized < 0.05,
-            "optimized ratio {optimized:.3} should be under the 5% target"
+            "optimized ratio {optimized:.3} should stay under the 5% target"
         );
     }
 
