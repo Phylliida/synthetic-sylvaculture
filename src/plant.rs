@@ -184,8 +184,10 @@ pub struct Plant {
 
 impl Plant {
     pub fn new(protos: Vec<Prototype>, params: PlantParams, origin: Vec3) -> Self {
-        // Root module grows straight up.
-        let root_mod = Module::new(0, None, Quat::IDENTITY, origin);
+        // Root module grows straight up; its prototype is chosen from the
+        // morphospace at full vigor (D′ ≈ D).
+        let root_proto = nearest_proto(&protos, params.lambda, params.determinacy);
+        let root_mod = Module::new(root_proto, None, Quat::IDENTITY, origin);
         Plant {
             protos,
             modules: vec![Some(root_mod)],
@@ -426,18 +428,7 @@ impl Plant {
 
     /// Morphospace selection: nearest prototype to the query point in (λ, D).
     fn select_prototype(&self, lambda: f32, d: f32) -> usize {
-        let mut best = 0;
-        let mut best_d2 = f32::INFINITY;
-        for (i, proto) in self.protos.iter().enumerate() {
-            let dl = proto.lambda - lambda;
-            let dd = proto.determinacy - d;
-            let d2 = dl * dl + dd * dd;
-            if d2 < best_d2 {
-                best_d2 = d2;
-                best = i;
-            }
-        }
-        best
+        nearest_proto(&self.protos, lambda, d)
     }
 
     // --- 4. shedding --------------------------------------------------------
@@ -834,6 +825,22 @@ struct Placement {
     world_orient: HashMap<ModuleId, Quat>,
     /// World-space position of each module's root node.
     module_base: HashMap<ModuleId, Vec3>,
+}
+
+/// Voronoi-nearest prototype to a morphospace query point (λ, D).
+fn nearest_proto(protos: &[Prototype], lambda: f32, d: f32) -> usize {
+    let mut best = 0;
+    let mut best_d2 = f32::INFINITY;
+    for (i, proto) in protos.iter().enumerate() {
+        let dl = proto.lambda - lambda;
+        let dd = proto.determinacy - d;
+        let d2 = dl * dl + dd * dd;
+        if d2 < best_d2 {
+            best_d2 = d2;
+            best = i;
+        }
+    }
+    best
 }
 
 /// Volume of the intersection (lens) of two spheres.

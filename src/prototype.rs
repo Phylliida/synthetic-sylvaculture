@@ -111,30 +111,71 @@ fn build(
     }
 }
 
-/// The default prototype library. Milestone 1 ships a single monopodial module;
-/// the full morphospace of nine is filled in incrementally. Even one prototype
-/// already exhibits the excurrent/decurrent split governed by apical control.
-pub fn default_library() -> Vec<Prototype> {
+/// Parametric module prototype. Geometry is derived from the morphospace
+/// coordinates so the nine prototypes vary continuously:
+///   * apical control `lambda` sets the branching angle (high λ → narrow,
+///     excurrent; low λ → wide, decurrent);
+///   * determinacy `d` sets the topology (high D → monopodial: a straight
+///     apical continuation plus laterals; low D → sympodial: equal slanted
+///     forks with no dominant axis).
+/// Laterals are spread in azimuth for a 3D crown.
+fn make_proto(name: &'static str, lambda: f32, d: f32) -> Prototype {
     use glam::vec3;
+    use std::f32::consts::{PI, TAU};
 
-    // --- Monopodial module: a vertical internode that splits into one apical
-    // continuation plus two lateral connectors. High lambda -> the apical child
-    // dominates -> tall straight trunk (excurrent). Low lambda -> laterals win
-    // -> bushy (decurrent). ---
-    let monopodial = build(
-        "monopodial",
-        /*lambda*/ 0.75,
-        /*determinacy*/ 0.8,
-        &[
-            (vec3(0.0, 0.0, 0.0), None),    // 0 root
-            (vec3(0.0, 0.8, 0.0), Some(0)), // 1 internode top
-            (vec3(0.0, 1.7, 0.0), Some(1)), // 2 apical terminal (straight up)
-            (vec3(0.55, 1.35, 0.0), Some(1)), // 3 lateral terminal +x
-            (vec3(-0.55, 1.35, 0.0), Some(1)), // 4 lateral terminal -x
-        ],
-        // apical first
-        vec![2, 3, 4],
-    );
+    let internode = 0.8;
+    let blen = 0.85;
+    let ba = (25.0 + (1.0 - lambda) * 37.0).to_radians(); // 25°..62°
+    let top = vec3(0.0, internode, 0.0);
+    let lateral = |phi: f32| -> Vec3 {
+        top + vec3(ba.sin() * phi.cos(), ba.cos(), ba.sin() * phi.sin()) * blen
+    };
 
-    vec![monopodial]
+    let mut raw: Vec<(Vec3, Option<usize>)> = vec![
+        (vec3(0.0, 0.0, 0.0), None),  // 0 root
+        (top, Some(0)),               // 1 internode top
+    ];
+    let mut terminals = Vec::new();
+
+    if d >= 0.45 {
+        // Monopodial: straight apical continuation + two opposed laterals.
+        raw.push((top + vec3(0.04, 0.9, 0.0), Some(1)));
+        terminals.push(raw.len() - 1); // apical first
+        for phi in [0.0, PI] {
+            raw.push((lateral(phi), Some(1)));
+            terminals.push(raw.len() - 1);
+        }
+    } else {
+        // Sympodial: equal slanted forks, no dominant axis (more forks when D
+        // is very low). terminals[0] is nominally apical but is itself slanted.
+        let n = if d < 0.3 { 3 } else { 2 };
+        for k in 0..n {
+            let phi = TAU * k as f32 / n as f32;
+            raw.push((lateral(phi), Some(1)));
+            terminals.push(raw.len() - 1);
+        }
+    }
+
+    build(name, lambda, d, &raw, terminals)
+}
+
+/// The default prototype library: nine prototypes on a (λ, D) grid spanning the
+/// morphospace. A vigorous parent (high D′) selects monopodial modules; a weak
+/// one selects sympodial — giving intra-tree variation as well as species
+/// variation via the plant's λ.
+pub fn default_library() -> Vec<Prototype> {
+    const NAMES: [&str; 9] = [
+        "sympodial-wide", "forked-wide", "monopodial-wide",
+        "sympodial-mid", "forked-mid", "monopodial-mid",
+        "sympodial-narrow", "forked-narrow", "monopodial-narrow",
+    ];
+    let lambdas = [0.25f32, 0.55, 0.85];
+    let ds = [0.25f32, 0.55, 0.85];
+    let mut out = Vec::with_capacity(9);
+    for (li, &lam) in lambdas.iter().enumerate() {
+        for (di, &dd) in ds.iter().enumerate() {
+            out.push(make_proto(NAMES[li * 3 + di], lam, dd));
+        }
+    }
+    out
 }
