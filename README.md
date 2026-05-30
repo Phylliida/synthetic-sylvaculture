@@ -33,8 +33,17 @@ Pipe Model yields a trunk thicker than its twigs. (See `cargo test`.)
 - Validated against Fig. 15a: intersection-volume ratio drops from ~5.4% (naive)
   to ~0.3% (optimized), under the paper's 5% target. Toggle live with O / L.
 
-**Next:** ecosystem scale — terrain, seeding, global shadow grid, climate/biomes;
-plus filling the 9-prototype morphospace and foliage.
+**Milestone 3 — visual polish (done).**
+- Foliage: leaf-quad fans on twigs, deterministic (flicker-free), green; F toggles
+- Nine-prototype morphospace via a parametric generator (branch angle from λ,
+  monopodial↔sympodial from D, 3D azimuthal spread); a vigorous parent gets
+  monopodial modules, a weak tip sympodial — intra-tree structural variety
+- Five species presets (conifer / poplar / birch / oak / shrub), each with its
+  own form + leaf/bark colour; cycle with N. Adapted from Tab. 4's character
+  (the table's units differ from this model's scales)
+- Warm key + cool fill directional lights + ambient, lighter sky
+
+**Next:** ecosystem scale — terrain, seeding, global shadow grid, climate/biomes.
 
 ## Running
 

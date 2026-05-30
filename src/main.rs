@@ -11,6 +11,7 @@
 mod mesh;
 mod plant;
 mod prototype;
+mod species;
 
 use glam::vec3 as gvec3;
 use plant::{Plant, PlantParams};
@@ -18,6 +19,34 @@ use three_d::*;
 
 fn make_plant(params: PlantParams) -> Plant {
     Plant::new(prototype::default_library(), params, gvec3(0.0, 0.0, 0.0))
+}
+
+fn make_bark(context: &Context, rgb: (u8, u8, u8)) -> PhysicalMaterial {
+    let mut m = PhysicalMaterial::new_opaque(
+        context,
+        &CpuMaterial {
+            albedo: Srgba::new(rgb.0, rgb.1, rgb.2, 255),
+            roughness: 0.9,
+            metallic: 0.0,
+            ..Default::default()
+        },
+    );
+    m.render_states.cull = Cull::None;
+    m
+}
+
+fn make_leaf(context: &Context, rgb: (u8, u8, u8)) -> PhysicalMaterial {
+    let mut m = PhysicalMaterial::new_opaque(
+        context,
+        &CpuMaterial {
+            albedo: Srgba::new(rgb.0, rgb.1, rgb.2, 255),
+            roughness: 0.8,
+            metallic: 0.0,
+            ..Default::default()
+        },
+    );
+    m.render_states.cull = Cull::None;
+    m
 }
 
 /// Headless sanity/tuning sweep — no window, no GL. `cargo run -- --stats`.
@@ -41,6 +70,21 @@ fn run_stats() {
                 );
             }
         }
+    }
+
+    println!("\nspecies presets (100 steps each):");
+    for sp in species::library() {
+        let mut plant = make_plant(sp.params);
+        for _ in 0..100 {
+            plant.step(1.0);
+        }
+        println!(
+            "  {:<22}  modules {:>4}  leaves {:>4}  height {:.2}",
+            sp.name,
+            plant.module_count(),
+            plant.leaves().len(),
+            plant.height()
+        );
     }
 
     println!("\nflicker: back-and-forth wiggle of mature modules (path−net over 30 steps), λ=0.30:");
@@ -148,40 +192,19 @@ fn main() {
     );
     ground.set_transformation(Mat4::from_angle_x(degrees(-90.0)) * Mat4::from_scale(50.0));
 
-    // Bark material (cull disabled during bring-up so winding never hides it).
-    let mut bark = PhysicalMaterial::new_opaque(
-        &context,
-        &CpuMaterial {
-            albedo: Srgba::new(125, 86, 56, 255),
-            roughness: 0.9,
-            metallic: 0.0,
-            ..Default::default()
-        },
-    );
-    bark.render_states.cull = Cull::None;
+    // --- species presets (Sec. 6.1 / Tab. 4, adapted) ---
+    let species = species::library();
+    let mut sp_idx = 2usize; // birch
+    let mut params = species[sp_idx].params.clone();
 
-    // Leaf material: vertex-colored greens, two-sided.
-    let mut leaf_mat = PhysicalMaterial::new_opaque(
-        &context,
-        &CpuMaterial {
-            albedo: Srgba::new(86, 150, 64, 255), // green; vertex tints vary it
-            roughness: 0.8,
-            metallic: 0.0,
-            ..Default::default()
-        },
-    );
-    leaf_mat.render_states.cull = Cull::None;
+    let mut bark = make_bark(&context, species[sp_idx].bark_rgb);
+    let mut leaf_mat = make_leaf(&context, species[sp_idx].leaf_rgb);
 
     let leaf_size = 0.38;
     let leaves_per_cluster = 5;
     let mut show_foliage = true;
 
     // --- simulation state ---
-    let mut params = PlantParams::default();
-    // Sec. 5.2.3 model on by default: branches avoid collisions and compete for
-    // light. Toggle live with O / L.
-    params.collision_light = true;
-    params.optimize_orientation = true;
     let mut plant = make_plant(params.clone());
     let mut tree = Gm::new(
         Mesh::new(&context, &mesh::build_tree_mesh(&plant.skeleton(), 8)),
@@ -212,11 +235,8 @@ fn main() {
 
     println!("Synthetic Sylvaculture — single plant growth");
     println!("  Space play/pause · S step · R reset · ←/→ λ · ↑/↓ growth rate");
-    println!("  O orientation-opt toggle · L collision-light toggle · F foliage toggle");
-    println!(
-        "  start: λ={:.2}  gp={:.2}  orient-opt={}  collision-light={}",
-        params.lambda, params.gp, params.optimize_orientation, params.collision_light
-    );
+    println!("  N next species · O orientation-opt · L collision-light · F foliage");
+    println!("  start species: {}  (λ={:.2}, D={:.2})", species[sp_idx].name, params.lambda, params.determinacy);
 
     window.render_loop(move |mut frame_input| {
         camera.set_viewport(frame_input.viewport);
@@ -264,6 +284,16 @@ fn main() {
                     Key::F => {
                         show_foliage = !show_foliage;
                         println!("[foliage {}]", if show_foliage { "on" } else { "off" });
+                    }
+                    Key::N => {
+                        sp_idx = (sp_idx + 1) % species.len();
+                        params = species[sp_idx].params.clone();
+                        bark = make_bark(&context, species[sp_idx].bark_rgb);
+                        leaf_mat = make_leaf(&context, species[sp_idx].leaf_rgb);
+                        tree.material = bark.clone();
+                        foliage.material = leaf_mat.clone();
+                        reset = true;
+                        println!("[species] {}", species[sp_idx].name);
                     }
                     _ => {}
                 }
