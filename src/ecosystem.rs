@@ -4,12 +4,102 @@
 //! each an independent growth simulation, rendered as one combined mesh.
 //! Global shadowing, seeding, and climate arrive in later stages.
 
-use crate::plant::{Plant, Segment};
+use crate::plant::{ModuleId, Plant, Segment};
 use crate::prototype::default_library;
 use crate::species::{self, Species};
 use glam::{vec3, Vec3};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
+use std::collections::HashMap;
+
+/// Global shadow-propagation grid (Pałubicki 2009; Silviculture Sec. 6.2).
+/// Each module casts a downward pyramidal penumbra into a voxel grid; a module
+/// then reads its light availability Q_G = max(C − s + a, 0)/C from the grid.
+/// The `+a` cancels a module's self-shadow.
+struct ShadowGrid {
+    min: Vec3,
+    cell: f32,
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    s: Vec<f32>,
+    a: f32,
+    b: f32,
+    c: f32,
+    qmax: i32,
+}
+
+impl ShadowGrid {
+    fn new(size: f32, max_y: f32, cell: f32) -> Self {
+        let margin = 3.0;
+        let span = (size + margin) * 2.0;
+        let nx = (span / cell).ceil() as usize + 1;
+        let ny = (max_y / cell).ceil() as usize + 1;
+        let nz = nx;
+        ShadowGrid {
+            min: vec3(-size - margin, 0.0, -size - margin),
+            cell,
+            nx,
+            ny,
+            nz,
+            s: vec![0.0; nx * ny * nz],
+            a: 1.0,
+            b: 2.0,
+            c: 8.0,
+            qmax: 6,
+        }
+    }
+
+    fn ijk(&self, p: Vec3) -> (i32, i32, i32) {
+        (
+            ((p.x - self.min.x) / self.cell).floor() as i32,
+            ((p.y - self.min.y) / self.cell).floor() as i32,
+            ((p.z - self.min.z) / self.cell).floor() as i32,
+        )
+    }
+
+    fn in_bounds(&self, i: i32, j: i32, k: i32) -> bool {
+        i >= 0
+            && j >= 0
+            && k >= 0
+            && (i as usize) < self.nx
+            && (j as usize) < self.ny
+            && (k as usize) < self.nz
+    }
+
+    fn idx(&self, i: i32, j: i32, k: i32) -> usize {
+        i as usize + self.nx * (k as usize + self.nz * j as usize)
+    }
+
+    fn deposit(&mut self, p: Vec3) {
+        let (ci, cj, ck) = self.ijk(p);
+        for q in 0..=self.qmax {
+            let j = cj - q; // shadow propagates downward
+            if j < 0 {
+                break;
+            }
+            let ds = self.a * self.b.powi(-q);
+            for di in -q..=q {
+                for dk in -q..=q {
+                    let (i, k) = (ci + di, ck + dk);
+                    if self.in_bounds(i, j, k) {
+                        let id = self.idx(i, j, k);
+                        self.s[id] += ds;
+                    }
+                }
+            }
+        }
+    }
+
+    fn light_at(&self, p: Vec3) -> f32 {
+        let (i, j, k) = self.ijk(p);
+        let i = i.clamp(0, self.nx as i32 - 1);
+        let j = j.clamp(0, self.ny as i32 - 1);
+        let k = k.clamp(0, self.nz as i32 - 1);
+        let sv = self.s[self.idx(i, j, k)];
+        ((self.c - sv + self.a).max(0.0) / self.c).clamp(0.0, 1.0)
+    }
+}
 
 pub struct Ecosystem {
     pub species: Vec<Species>,
@@ -19,6 +109,8 @@ pub struct Ecosystem {
     /// Half-extent of the square ground.
     pub size: f32,
     pub age: f32,
+    /// Global shadowing on/off (Sec. 6.2). Off = plants ignore each other's shade.
+    pub shadow_enabled: bool,
     rng: ChaCha8Rng,
 }
 
@@ -49,14 +141,37 @@ impl Ecosystem {
             species_idx,
             size,
             age: 0.0,
+            shadow_enabled: true,
             rng,
         }
     }
 
     pub fn step(&mut self, dt: f32) {
         self.age += dt;
+
+        if !self.shadow_enabled {
+            for p in &mut self.plants {
+                p.step(dt);
+            }
+            return;
+        }
+
+        // 1. Deposit every module's shadow into a shared grid (current geometry).
+        let mut grid = ShadowGrid::new(self.size, 45.0, 1.5);
+        for p in &self.plants {
+            for (_, c) in p.module_centres() {
+                grid.deposit(c);
+            }
+        }
+
+        // 2. Each plant reads its per-module global-shadow light and grows.
         for p in &mut self.plants {
-            p.step(dt);
+            let qg: HashMap<ModuleId, f32> = p
+                .module_centres()
+                .into_iter()
+                .map(|(id, c)| (id, grid.light_at(c)))
+                .collect();
+            p.step_shaded(dt, &qg);
         }
     }
 
@@ -66,6 +181,10 @@ impl Ecosystem {
 
     pub fn total_modules(&self) -> usize {
         self.plants.iter().map(|p| p.module_count()).sum()
+    }
+
+    pub fn plant_heights(&self) -> Vec<f32> {
+        self.plants.iter().map(|p| p.height()).collect()
     }
 
     /// Per-plant trunk segments tinted with that plant's bark colour.

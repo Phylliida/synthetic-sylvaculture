@@ -59,6 +59,10 @@ pub struct PlantParams {
     pub g2: f32,
     /// Maximum plant age before senescence begins (p_max).
     pub p_max: f32,
+    /// Shade tolerance s_tol ∈ [0,1] (Sec. 6.2): the global-shadow light floor.
+    /// Q_eff = lerp(s_tol, 1, Q·Q_G), so a tolerant plant (high s_tol) still
+    /// receives light under shade. 0 = no global shadowing effect.
+    pub shade_tolerance: f32,
 
     // --- Sec. 5.2.3 module orientation optimization + collision light ---
     /// Use collision-based light Q = exp(−scale·f_collisions) instead of Q=1.
@@ -111,6 +115,7 @@ impl Default for PlantParams {
             g1: 1.0,
             g2: -0.35,
             p_max: 1.0e9, // effectively no senescence in milestone 1
+            shade_tolerance: 0.0,
             // Sec. 5.2.3 features default OFF so the base-model tests stay
             // exact; the viewer and the orientation tests enable them.
             collision_light: false,
@@ -213,8 +218,18 @@ impl Plant {
         self.modules.iter().filter(|m| m.is_some()).count()
     }
 
-    /// Advance the simulation by one step of size `dt`.
+    /// Advance the simulation by one step of size `dt` (standalone plant).
     pub fn step(&mut self, dt: f32) {
+        self.step_impl(dt, None);
+    }
+
+    /// Advance with externally-supplied global shadow light Q_G per module
+    /// (driven by the ecosystem's shadow grid, Sec. 6.2).
+    pub fn step_shaded(&mut self, dt: f32, qg: &HashMap<ModuleId, f32>) {
+        self.step_impl(dt, Some(qg));
+    }
+
+    fn step_impl(&mut self, dt: f32, qg: Option<&HashMap<ModuleId, f32>>) {
         self.age += dt;
         // Collision-based light reads the current geometry's bounding spheres.
         let spheres = if self.params.collision_light {
@@ -222,7 +237,7 @@ impl Plant {
         } else {
             HashMap::new()
         };
-        self.light_pass(&spheres);
+        self.light_pass(&spheres, qg);
         self.vigor_pass();
         self.develop(dt);
         self.shed();
@@ -233,19 +248,21 @@ impl Plant {
 
     // --- 1. basipetal light accumulation ------------------------------------
     // Local light Q(u) = exp(−scale·f_collisions(u)) (Eq. 1, =1 when disabled),
-    // then Q_acc(u) = Q(u) + Σ Q_acc(child): accumulate flux tip-to-base.
-    fn light_pass(&mut self, spheres: &HashMap<ModuleId, BSphere>) {
-        // Local light per module.
-        if self.params.collision_light {
-            let scale = self.params.light_scale;
-            for id in self.alive_ids() {
-                let f = self.f_collisions(id, spheres);
-                self.module_mut(id).q_local = (-scale * f).exp();
-            }
-        } else {
-            for id in self.alive_ids() {
-                self.module_mut(id).q_local = 1.0;
-            }
+    // folded with the global shadow Q_G as Q_eff = lerp(s_tol, 1, Q·Q_G)
+    // (Sec. 6.2), then Q_acc(u) = Q_eff(u) + Σ Q_acc(child) tip-to-base.
+    fn light_pass(&mut self, spheres: &HashMap<ModuleId, BSphere>, qg: Option<&HashMap<ModuleId, f32>>) {
+        let stol = self.params.shade_tolerance;
+        let scale = self.params.light_scale;
+        let collision = self.params.collision_light;
+        for id in self.alive_ids() {
+            let q_col = if collision {
+                (-scale * self.f_collisions(id, spheres)).exp()
+            } else {
+                1.0
+            };
+            let q_g = qg.and_then(|m| m.get(&id).copied()).unwrap_or(1.0);
+            // lerp(stol, 1, q_col*q_g)
+            self.module_mut(id).q_local = stol + (1.0 - stol) * (q_col * q_g);
         }
         // Basipetal accumulation.
         let order = self.post_order(self.root);
@@ -289,7 +306,13 @@ impl Plant {
         } else {
             (1.0 - (self.age - p.p_max) / p.p_max.max(1.0)).clamp(0.0, 1.0)
         };
-        let v_root = p.v_root_max * senescence;
+        // Total resource scales with the light the plant actually gathers
+        // (Borchert-Honda v_base = α·Q_base, capped at v_root_max). avg_q is the
+        // mean per-module effective light ∈ [s_tol, 1]; a shaded plant gathers
+        // less and is suppressed — the mechanism behind understory stunting and
+        // succession. With no shading (avg_q = 1) this is exactly v_root_max.
+        let avg_q = self.module(self.root).q_acc / self.module_count().max(1) as f32;
+        let v_root = p.v_root_max * senescence * avg_q.clamp(0.0, 1.0);
 
         // Pre-order: parent's vigor is known before its children's.
         let order = self.pre_order(self.root);
@@ -666,6 +689,14 @@ impl Plant {
         self.module_spheres()
             .into_iter()
             .filter(|(id, _)| self.module(*id).age >= am)
+            .map(|(id, s)| (id, s.centre))
+            .collect()
+    }
+
+    /// World-space centre of each module (for shadow-grid deposition).
+    pub fn module_centres(&self) -> Vec<(ModuleId, Vec3)> {
+        Self::spheres_from(&self.place())
+            .into_iter()
             .map(|(id, s)| (id, s.centre))
             .collect()
     }

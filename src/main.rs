@@ -74,6 +74,28 @@ fn run_stats() {
         }
     }
 
+    println!("\necosystem: global shadowing on vs off (40 plants on a 26×26 plot, 140 steps):");
+    for shadow in [false, true] {
+        let mut eco = Ecosystem::new(40, 13.0, 7);
+        let steps = 140;
+        eco.shadow_enabled = shadow;
+        for _ in 0..steps {
+            eco.step(1.0);
+        }
+        let mut h = eco.plant_heights();
+        h.sort_by(f32::total_cmp);
+        let med = h[h.len() / 2];
+        let suppressed = h.iter().filter(|&&x| x < 2.0).count();
+        println!(
+            "  shadow {:<3}  total modules {:>5}  median height {:.1}  tallest {:.1}  suppressed(<2m) {}",
+            if shadow { "on" } else { "off" },
+            eco.total_modules(),
+            med,
+            h.last().copied().unwrap_or(0.0),
+            suppressed
+        );
+    }
+
     println!("\nspecies presets (100 steps each):");
     for sp in species::library() {
         let mut plant = make_plant(sp.params);
@@ -178,9 +200,10 @@ fn run_ecosystem() {
     let key = DirectionalLight::new(&context, 2.6, Srgba::new(255, 247, 230, 255), vec3(-0.5, -1.0, -0.7));
     let fill = DirectionalLight::new(&context, 0.9, Srgba::new(180, 200, 255, 255), vec3(0.8, -0.4, 0.5));
 
-    let eco_size = 18.0f32;
+    let eco_size = 14.0f32;
+    let plant_count = 40;
     let mut seed = 7u64;
-    let mut eco = Ecosystem::new(28, eco_size, seed);
+    let mut eco = Ecosystem::new(plant_count, eco_size, seed);
 
     let mut ground = Gm::new(
         Mesh::new(&context, &CpuMesh::square()),
@@ -253,7 +276,7 @@ fn run_ecosystem() {
 
         if reset {
             seed += 1;
-            eco = Ecosystem::new(28, eco_size, seed);
+            eco = Ecosystem::new(plant_count, eco_size, seed);
             step_count = 0;
             accum_ms = 0.0;
             dirty = true;
