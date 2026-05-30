@@ -10,6 +10,7 @@
 
 mod ecosystem;
 mod mesh;
+mod overlay;
 mod plant;
 mod prototype;
 mod species;
@@ -281,6 +282,11 @@ fn run_ecosystem() {
     );
     leaf.render_states.cull = Cull::None;
 
+    // Unlit material for the 2D biome-chart overlay (vertex-coloured, on top).
+    let mut overlay_mat = ColorMaterial::default();
+    overlay_mat.render_states.cull = Cull::None;
+    overlay_mat.render_states.depth_test = DepthTest::Always;
+
     let leaf_size = 0.4;
     let per_cluster = 5;
     let build_trunks =
@@ -300,7 +306,7 @@ fn run_ecosystem() {
 
     println!("Synthetic Sylvaculture — Ecosystem");
     println!("  Space play/pause · S step · R reseed · F foliage · mouse orbit/zoom");
-    println!("  ←/→ temperature · ↑/↓ precipitation (reseeds the biome)");
+    println!("  ←/→ temperature · ↑/↓ precipitation · or CLICK the biome chart (top-left)");
     println!(
         "  climate: {:.0}°C, {:.0}cm  →  {}",
         climate.temp,
@@ -309,11 +315,29 @@ fn run_ecosystem() {
     );
 
     window.render_loop(move |mut frame_input| {
-        camera.set_viewport(frame_input.viewport);
-        control.handle_events(&mut camera, &mut frame_input.events);
+        let vp = frame_input.viewport;
+        camera.set_viewport(vp);
 
         let mut dirty = false;
         let mut reset = false;
+
+        // Intercept clicks on the biome chart *before* the orbit control, so a
+        // chart click sets the climate instead of spinning the camera.
+        for event in frame_input.events.iter_mut() {
+            if let Event::MousePress { button: MouseButton::Left, position, handled, .. } = event {
+                if !*handled {
+                    if let Some((t, p)) = overlay::screen_to_climate(vp, position.x, position.y) {
+                        climate.temp = t;
+                        climate.precip = p;
+                        reset = true;
+                        *handled = true;
+                    }
+                }
+            }
+        }
+
+        control.handle_events(&mut camera, &mut frame_input.events);
+
         for event in frame_input.events.iter() {
             if let Event::KeyPress { kind, .. } = event {
                 match kind {
@@ -392,6 +416,14 @@ fn run_ecosystem() {
         } else {
             screen.render(&camera, ground.into_iter().chain(&trunks), &[&ambient, &key, &fill]);
         }
+
+        // 2D biome-chart overlay (drawn on top via DepthTest::Always).
+        let cam2d = Camera::new_2d(vp);
+        let chart = Gm::new(
+            Mesh::new(&context, &overlay::build_chart(vp, climate.temp, climate.precip)),
+            overlay_mat.clone(),
+        );
+        screen.render(&cam2d, &chart, &[] as &[&dyn Light]);
 
         FrameOutput::default()
     });
