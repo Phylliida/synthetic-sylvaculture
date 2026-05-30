@@ -32,10 +32,11 @@ fn run_stats() {
             if s % 40 == 39 {
                 let segs = plant.skeleton();
                 println!(
-                    "  λ={lambda:.2}  step {:>3}  modules {:>4}  segs {:>5}  height {:.2}",
+                    "  λ={lambda:.2}  step {:>3}  modules {:>4}  segs {:>5}  leaves {:>4}  height {:.2}",
                     s + 1,
                     plant.module_count(),
                     segs.len(),
+                    plant.leaves().len(),
                     plant.height()
                 );
             }
@@ -130,9 +131,9 @@ fn main() {
     );
     let mut control = OrbitControl::new(camera.target(), 1.0, 100.0);
 
-    let ambient = AmbientLight::new(&context, 0.5, Srgba::WHITE);
-    let directional =
-        DirectionalLight::new(&context, 2.5, Srgba::WHITE, vec3(-0.5, -1.0, -0.7));
+    let ambient = AmbientLight::new(&context, 0.45, Srgba::new(200, 215, 255, 255));
+    let key = DirectionalLight::new(&context, 2.6, Srgba::new(255, 247, 230, 255), vec3(-0.5, -1.0, -0.7));
+    let fill = DirectionalLight::new(&context, 0.9, Srgba::new(180, 200, 255, 255), vec3(0.8, -0.4, 0.5));
 
     // Ground plane.
     let mut ground = Gm::new(
@@ -159,6 +160,22 @@ fn main() {
     );
     bark.render_states.cull = Cull::None;
 
+    // Leaf material: vertex-colored greens, two-sided.
+    let mut leaf_mat = PhysicalMaterial::new_opaque(
+        &context,
+        &CpuMaterial {
+            albedo: Srgba::new(86, 150, 64, 255), // green; vertex tints vary it
+            roughness: 0.8,
+            metallic: 0.0,
+            ..Default::default()
+        },
+    );
+    leaf_mat.render_states.cull = Cull::None;
+
+    let leaf_size = 0.38;
+    let leaves_per_cluster = 5;
+    let mut show_foliage = true;
+
     // --- simulation state ---
     let mut params = PlantParams::default();
     // Sec. 5.2.3 model on by default: branches avoid collisions and compete for
@@ -170,6 +187,13 @@ fn main() {
         Mesh::new(&context, &mesh::build_tree_mesh(&plant.skeleton(), 8)),
         bark.clone(),
     );
+    let mut foliage = Gm::new(
+        Mesh::new(
+            &context,
+            &mesh::build_foliage_mesh(&plant.leaves(), leaf_size, leaves_per_cluster),
+        ),
+        leaf_mat.clone(),
+    );
 
     let mut playing = true;
     let mut step_count: u32 = 0;
@@ -179,10 +203,16 @@ fn main() {
     let rebuild = |plant: &Plant, context: &Context| {
         Mesh::new(context, &mesh::build_tree_mesh(&plant.skeleton(), 8))
     };
+    let rebuild_foliage = move |plant: &Plant, context: &Context| {
+        Mesh::new(
+            context,
+            &mesh::build_foliage_mesh(&plant.leaves(), leaf_size, leaves_per_cluster),
+        )
+    };
 
     println!("Synthetic Sylvaculture — single plant growth");
     println!("  Space play/pause · S step · R reset · ←/→ λ · ↑/↓ growth rate");
-    println!("  O orientation-opt toggle · L collision-light toggle");
+    println!("  O orientation-opt toggle · L collision-light toggle · F foliage toggle");
     println!(
         "  start: λ={:.2}  gp={:.2}  orient-opt={}  collision-light={}",
         params.lambda, params.gp, params.optimize_orientation, params.collision_light
@@ -231,6 +261,10 @@ fn main() {
                         params.collision_light = !params.collision_light;
                         reset = true;
                     }
+                    Key::F => {
+                        show_foliage = !show_foliage;
+                        println!("[foliage {}]", if show_foliage { "on" } else { "off" });
+                    }
                     _ => {}
                 }
             }
@@ -267,6 +301,7 @@ fn main() {
 
         if dirty {
             tree.geometry = rebuild(&plant, &context);
+            foliage.geometry = rebuild_foliage(&plant, &context);
             if step_count % 10 == 0 || !playing {
                 println!(
                     "  step {:>4}  modules {:>4}  age {:.1}",
@@ -277,14 +312,22 @@ fn main() {
             }
         }
 
-        frame_input
-            .screen()
-            .clear(ClearState::color_and_depth(0.55, 0.68, 0.85, 1.0, 1.0))
-            .render(
+        let screen = frame_input
+            .screen();
+        screen.clear(ClearState::color_and_depth(0.62, 0.74, 0.90, 1.0, 1.0));
+        if show_foliage {
+            screen.render(
+                &camera,
+                ground.into_iter().chain(&tree).chain(&foliage),
+                &[&ambient, &key, &fill],
+            );
+        } else {
+            screen.render(
                 &camera,
                 ground.into_iter().chain(&tree),
-                &[&ambient, &directional],
+                &[&ambient, &key, &fill],
             );
+        }
 
         FrameOutput::default()
     });

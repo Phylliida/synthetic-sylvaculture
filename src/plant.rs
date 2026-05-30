@@ -640,6 +640,26 @@ impl Plant {
         segs
     }
 
+    /// Leaf attachment points for foliage: every thin twig node (diameter near
+    /// φ) that has actually extended, returned as (world position, outward
+    /// segment direction). Foliage clusters are drawn at these points.
+    pub fn leaves(&self) -> Vec<(Vec3, Vec3)> {
+        let pl = self.place();
+        let twig = self.params.phi * 2.5;
+        let mut out = Vec::new();
+        for g in 0..pl.pos.len() {
+            let pg = match pl.parent[g] {
+                Some(pg) => pg,
+                None => continue,
+            };
+            let seg = pl.pos[g] - pl.pos[pg];
+            if pl.diam[g] <= twig && seg.length() > 0.15 {
+                out.push((pl.pos[g], seg.normalize()));
+            }
+        }
+        out
+    }
+
     /// Spherical bounding volume B_u per module (Sec. 5.2.1): centre = centroid
     /// of the module's node geometry, radius = enclosing radius (+ small margin).
     /// Returns a map keyed by module id. Modules with no developed geometry yet
