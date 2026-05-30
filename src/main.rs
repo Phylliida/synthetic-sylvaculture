@@ -226,6 +226,110 @@ fn run_stats() {
     }
 }
 
+/// Render one ecosystem frame (scene + biome-chart overlay) off-screen and
+/// return the RGBA pixels (top-to-bottom). Lets us screenshot the viewer
+/// without a visible window, so the rendered result can be inspected directly.
+fn render_shot(context: &Context, eco: &Ecosystem, climate: Climate, w: u32, h: u32) -> Vec<[u8; 4]> {
+    let color = Texture2D::new_empty::<[u8; 4]>(
+        context,
+        w,
+        h,
+        Interpolation::Linear,
+        Interpolation::Linear,
+        None,
+        Wrapping::ClampToEdge,
+        Wrapping::ClampToEdge,
+    );
+    let depth =
+        DepthTexture2D::new::<f32>(context, w, h, Wrapping::ClampToEdge, Wrapping::ClampToEdge);
+    let target = RenderTarget::new(color.as_color_target(None), depth.as_depth_target());
+    let viewport = Viewport { x: 0, y: 0, width: w, height: h };
+
+    let camera = Camera::new_perspective(
+        viewport,
+        vec3(40.0, 26.0, 40.0),
+        vec3(0.0, 6.0, 0.0),
+        vec3(0.0, 1.0, 0.0),
+        degrees(45.0),
+        0.1,
+        2000.0,
+    );
+    let ambient = AmbientLight::new(context, 0.5, Srgba::new(200, 215, 255, 255));
+    let key = DirectionalLight::new(context, 2.6, Srgba::new(255, 247, 230, 255), vec3(-0.5, -1.0, -0.7));
+    let fill = DirectionalLight::new(context, 0.9, Srgba::new(180, 200, 255, 255), vec3(0.8, -0.4, 0.5));
+
+    let mut ground = Gm::new(
+        Mesh::new(context, &CpuMesh::square()),
+        PhysicalMaterial::new_opaque(context, &CpuMaterial { albedo: Srgba::new(70, 105, 58, 255), ..Default::default() }),
+    );
+    ground.set_transformation(Mat4::from_angle_x(degrees(-90.0)) * Mat4::from_scale(eco.size * 2.2));
+
+    let mut wood = PhysicalMaterial::new_opaque(context, &CpuMaterial { albedo: Srgba::WHITE, roughness: 0.9, ..Default::default() });
+    wood.render_states.cull = Cull::None;
+    let mut leaf = PhysicalMaterial::new_opaque(context, &CpuMaterial { albedo: Srgba::WHITE, roughness: 0.8, ..Default::default() });
+    leaf.render_states.cull = Cull::None;
+    let trunks = Gm::new(Mesh::new(context, &mesh::build_forest_mesh(&eco.trunk_batches(), 6)), wood);
+    let foliage = Gm::new(Mesh::new(context, &mesh::build_forest_foliage(&eco.foliage_batches(), 0.4, 5)), leaf);
+
+    let mut overlay_mat = ColorMaterial::default();
+    overlay_mat.render_states.cull = Cull::None;
+    overlay_mat.render_states.depth_test = DepthTest::Always;
+    let cam2d = Camera::new_2d(viewport);
+    let chart = Gm::new(
+        Mesh::new(context, &overlay::build_chart(viewport, climate.temp, climate.precip)),
+        overlay_mat,
+    );
+
+    target.clear(ClearState::color_and_depth(0.62, 0.74, 0.90, 1.0, 1.0));
+    target.render(&camera, ground.into_iter().chain(&trunks).chain(&foliage), &[&ambient, &key, &fill]);
+    target.render(&cam2d, &chart, &[] as &[&dyn Light]);
+    target.read_color::<[u8; 4]>()
+}
+
+/// `--shot <file.png> [--temp T] [--precip P] [--steps N]`: grow an ecosystem
+/// and save a screenshot (needs a GL context, so it opens a window briefly).
+fn run_shot() {
+    let args: Vec<String> = std::env::args().collect();
+    let val = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1));
+    let path = val("--shot").cloned().unwrap_or_else(|| "/tmp/shot.png".to_string());
+    let temp: f32 = val("--temp").and_then(|s| s.parse().ok()).unwrap_or(10.0);
+    let precip: f32 = val("--precip").and_then(|s| s.parse().ok()).unwrap_or(90.0);
+    let steps: u32 = val("--steps").and_then(|s| s.parse().ok()).unwrap_or(110);
+    let (w, h) = (1280u32, 800u32);
+
+    let window = Window::new(WindowSettings {
+        title: "shot".to_string(),
+        max_size: Some((w, h)),
+        ..Default::default()
+    })
+    .unwrap();
+    let context = window.gl();
+
+    let climate = Climate { temp, precip };
+    let mut eco = Ecosystem::new(40, 14.0, 7, climate);
+    for _ in 0..steps {
+        eco.step(1.0);
+    }
+    let pixels = render_shot(&context, &eco, climate, w, h);
+
+    let mut img = image::RgbaImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let p = pixels[(y * w + x) as usize];
+            img.put_pixel(x, y, image::Rgba(p));
+        }
+    }
+    img.save(&path).unwrap();
+    println!(
+        "wrote {path}  ({:.0}°C {:.0}cm → {}, {} plants, {} steps)",
+        temp,
+        precip,
+        biome_name(temp, precip),
+        eco.plant_count(),
+        steps
+    );
+}
+
 /// Ecosystem viewer: a stand of mixed-species plants growing together on flat
 /// ground, rendered as one combined per-species-coloured mesh. `--eco`.
 fn run_ecosystem() {
@@ -432,6 +536,10 @@ fn run_ecosystem() {
 fn main() {
     if std::env::args().any(|a| a == "--stats") {
         run_stats();
+        return;
+    }
+    if std::env::args().any(|a| a == "--shot") {
+        run_shot();
         return;
     }
     if std::env::args().any(|a| a == "--eco") {

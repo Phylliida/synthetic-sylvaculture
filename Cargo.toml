@@ -9,6 +9,7 @@ three-d = "0.19"
 glam = "0.29"
 rand = "0.8"
 rand_chacha = "0.3"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [profile.release]
 opt-level = 3
