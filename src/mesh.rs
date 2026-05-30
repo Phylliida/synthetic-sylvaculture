@@ -91,6 +91,136 @@ pub fn build_foliage_mesh(points: &[(GVec3, GVec3)], leaf_size: f32, per_cluster
     }
 }
 
+/// Forest trunk mesh: one combined mesh over many plants, each batch of
+/// segments tinted with that plant's bark colour via vertex colours (rendered
+/// against a white material).
+pub fn build_forest_mesh(batches: &[(Vec<Segment>, [u8; 3])], sides: usize) -> CpuMesh {
+    let sides = sides.max(3);
+    let mut positions: Vec<Vector3<f32>> = Vec::new();
+    let mut normals: Vec<Vector3<f32>> = Vec::new();
+    let mut colors: Vec<Srgba> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    for (segs, rgb) in batches {
+        let col = Srgba::new(rgb[0], rgb[1], rgb[2], 255);
+        for s in segs {
+            let axis = s.b - s.a;
+            let len = axis.length();
+            if len < 1e-6 {
+                continue;
+            }
+            let dir = axis / len;
+            let (u, v) = dir.any_orthonormal_pair();
+            let dr = s.rb - s.ra;
+            let base = positions.len() as u32;
+            for k in 0..sides {
+                let ang = std::f32::consts::TAU * (k as f32) / (sides as f32);
+                let radial = (u * ang.cos() + v * ang.sin()).normalize_or_zero();
+                let normal = (radial * len - dir * dr).normalize_or_zero();
+                positions.push(g2t(s.a + radial * s.ra));
+                normals.push(g2t(normal));
+                colors.push(col);
+                positions.push(g2t(s.b + radial * s.rb));
+                normals.push(g2t(normal));
+                colors.push(col);
+            }
+            for k in 0..sides {
+                let a0 = base + 2 * k as u32;
+                let b0 = base + 2 * k as u32 + 1;
+                let kn = (k + 1) % sides;
+                let a1 = base + 2 * kn as u32;
+                let b1 = base + 2 * kn as u32 + 1;
+                indices.extend_from_slice(&[a0, b0, b1, a0, b1, a1]);
+            }
+        }
+    }
+
+    CpuMesh {
+        positions: Positions::F32(positions),
+        indices: Indices::U32(indices),
+        normals: Some(normals),
+        colors: Some(colors),
+        ..Default::default()
+    }
+}
+
+/// Forest foliage mesh: leaf-quad fans over many plants, each batch tinted with
+/// that plant's leaf colour (plus per-leaf brightness variation).
+pub fn build_forest_foliage(
+    batches: &[(Vec<(GVec3, GVec3)>, [u8; 3])],
+    leaf_size: f32,
+    per_cluster: usize,
+) -> CpuMesh {
+    let mut positions: Vec<Vector3<f32>> = Vec::new();
+    let mut normals: Vec<Vector3<f32>> = Vec::new();
+    let mut colors: Vec<Srgba> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    for (bi, (points, rgb)) in batches.iter().enumerate() {
+        for (ti, (pos, dir)) in points.iter().enumerate() {
+            let dir = dir.normalize_or_zero();
+            let (u, v) = if dir.length_squared() > 1e-6 {
+                dir.any_orthonormal_pair()
+            } else {
+                (GVec3::X, GVec3::Z)
+            };
+            for j in 0..per_cluster {
+                let seed = (bi as u32)
+                    .wrapping_mul(1009)
+                    .wrapping_add((ti as u32).wrapping_mul(97))
+                    .wrapping_add(j as u32);
+                let az =
+                    std::f32::consts::TAU * (j as f32 / per_cluster as f32) + hash01(seed) * 1.2;
+                let radial = (u * az.cos() + v * az.sin()).normalize_or_zero();
+                let leaf_dir = (radial + dir * 0.5).normalize_or_zero();
+                let width_axis = leaf_dir.cross(radial).normalize_or_zero();
+                let size = leaf_size * (0.7 + 0.6 * hash01(seed.wrapping_add(7)));
+
+                let base_pt = *pos + dir * (leaf_size * 0.2);
+                let tip = base_pt + leaf_dir * size;
+                let mid = base_pt + leaf_dir * (size * 0.45);
+                let half_w = width_axis * (size * 0.35);
+                let p0 = base_pt;
+                let p1 = mid + half_w;
+                let p2 = tip;
+                let p3 = mid - half_w;
+                let normal = (p1 - p0).cross(p3 - p0).normalize_or_zero();
+
+                // Per-leaf brightness around the species leaf colour.
+                let t = 0.75 + 0.4 * hash01(seed.wrapping_add(31));
+                let col = Srgba::new(
+                    (rgb[0] as f32 * t).min(255.0) as u8,
+                    (rgb[1] as f32 * t).min(255.0) as u8,
+                    (rgb[2] as f32 * t).min(255.0) as u8,
+                    255,
+                );
+                let base_idx = positions.len() as u32;
+                for p in [p0, p1, p2, p3] {
+                    positions.push(g2t(p));
+                    normals.push(g2t(normal));
+                    colors.push(col);
+                }
+                indices.extend_from_slice(&[
+                    base_idx,
+                    base_idx + 1,
+                    base_idx + 2,
+                    base_idx,
+                    base_idx + 2,
+                    base_idx + 3,
+                ]);
+            }
+        }
+    }
+
+    CpuMesh {
+        positions: Positions::F32(positions),
+        indices: Indices::U32(indices),
+        normals: Some(normals),
+        colors: Some(colors),
+        ..Default::default()
+    }
+}
+
 pub fn build_tree_mesh(segments: &[Segment], sides: usize) -> CpuMesh {
     let sides = sides.max(3);
     let mut positions: Vec<Vector3<f32>> = Vec::new();
