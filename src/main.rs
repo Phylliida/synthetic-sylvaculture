@@ -148,6 +148,25 @@ fn run_stats() {
         );
     }
 
+    println!("\ntree morphology (each species grown solo 150 steps):");
+    for sp in species::library() {
+        let mut plant = make_plant(sp.params.clone());
+        for _ in 0..150 {
+            plant.step(1.0);
+        }
+        let segs = plant.skeleton();
+        let basal = segs.iter().map(|s| s.ra).fold(0.0, f32::max);
+        let h = plant.height();
+        println!(
+            "  {:<22} modules {:>3}  height {:5.1}  trunk_radius {:.3}  slenderness(h/d) {:>4.0}",
+            sp.name,
+            plant.module_count(),
+            h,
+            basal,
+            h / (2.0 * basal).max(1e-3),
+        );
+    }
+
     println!("\nspecies presets (100 steps each):");
     for sp in species::library() {
         let mut plant = make_plant(sp.params);
