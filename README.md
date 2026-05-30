@@ -43,7 +43,17 @@ Pipe Model yields a trunk thicker than its twigs. (See `cargo test`.)
   (the table's units differ from this model's scales)
 - Warm key + cool fill directional lights + ambient, lighter sky
 
-**Next:** ecosystem scale — terrain, seeding, global shadow grid, climate/biomes.
+**Milestone 4 — ecosystem (in progress).**
+- Many mixed-species plants on flat ground, one combined per-species-coloured
+  mesh; `./run.sh --eco`
+- Global shadow-propagation grid (Pałubicki / Sec. 6.2): downward pyramidal
+  penumbrae in a voxel grid; `Q_eff = lerp(s_tol, 1, Q·Q_G)` with per-species
+  shade tolerance
+- Root vigor scales with captured light (`v_base = α·Q_base`, capped) → shaded
+  plants are suppressed. Validated: global shadowing cuts total biomass ~36%
+  via competition (`cargo run -- --stats`)
+- **Next:** flowering + Gaussian seeding (→ succession / gap dynamics) and
+  climatic adaptation (Eq. 11, temperature/precipitation → the nine biomes).
 
 ## Running
 
