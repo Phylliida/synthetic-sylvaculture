@@ -29,7 +29,7 @@
 //! is procedural and emerges from the competition for light.
 
 use glam::Vec3;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Stable id of an internode (kept named `ModuleId` for the ecosystem API).
 pub type ModuleId = usize;
@@ -261,23 +261,35 @@ impl Plant {
         self.nodes.iter().filter(|n| n.is_some()).count()
     }
 
-    /// Advance the simulation one step (standalone plant, uniform light).
+    /// Advance the simulation one step (standalone plant: own marker dome,
+    /// self-shading).
     pub fn step(&mut self, dt: f32) {
-        self.step_impl(dt, None);
+        self.step_impl(dt, None, None);
     }
 
-    /// Advance with externally-supplied global-shadow light Q_G per internode
-    /// (the ecosystem's shadow grid, Sec. 6.2).
-    pub fn step_shaded(&mut self, dt: f32, qg: &HashMap<ModuleId, f32>) {
-        self.step_impl(dt, Some(qg));
+    /// Advance using the ecosystem's SHARED marker field — `space` is the
+    /// per-module growth direction V each bud captured (presence ⇒ free space),
+    /// `qg` the per-module global-shadow light g.
+    pub fn step_in_field(
+        &mut self,
+        dt: f32,
+        qg: &HashMap<ModuleId, f32>,
+        space: &HashMap<ModuleId, Vec3>,
+    ) {
+        self.step_impl(dt, Some(qg), Some(space));
     }
 
-    fn step_impl(&mut self, dt: f32, qg: Option<&HashMap<ModuleId, f32>>) {
+    fn step_impl(
+        &mut self,
+        dt: f32,
+        qg: Option<&HashMap<ModuleId, f32>>,
+        space: Option<&HashMap<ModuleId, Vec3>>,
+    ) {
         self.age += dt;
         for id in self.alive_ids() {
             self.node_mut(id).age += dt;
         }
-        self.environment(qg);
+        self.environment(qg, space);
         self.light_pass();
         self.vigor_pass();
         self.grow();
@@ -286,114 +298,32 @@ impl Plant {
     }
 
     // --- 1. environment: space colonization (Pałubicki §4.1) -----------------
-    // Buds compete for free-space marker points. Each step: (a) consume markers
-    // within ρ of any bud; (b) associate each remaining marker to the nearest
-    // bud that perceives it (within r and a forward cone); (c) a bud has space
-    // (Q=1) iff it was associated any marker, and its optimal growth direction
-    // V is the normalized sum of directions to those markers. Q is then scaled
-    // by the global-shadow light g (inter-plant competition). A bud with no free
-    // space gets Q=0 and stops — which bounds the leader and fills the envelope.
-    fn environment(&mut self, qg: Option<&HashMap<ModuleId, f32>>) {
-        let p = self.params.clone();
-        let stol = p.shade_tolerance;
+    // `space`, when supplied (ecosystem), gives the per-module growth direction V
+    // from the SHARED marker field — its presence means the bud captured free
+    // space (Q>0). When None (standalone plant) the plant colonizes its own
+    // private marker dome. `qg`, when supplied, is the global-shadow light g; else
+    // the plant self-shades. Each bud's Q = space-presence × light g; a bud with
+    // no free space gets Q=0 and stops (bounding the leader, filling the crown).
+    fn environment(
+        &mut self,
+        qg: Option<&HashMap<ModuleId, f32>>,
+        space: Option<&HashMap<ModuleId, Vec3>>,
+    ) {
+        let stol = self.params.shade_tolerance;
         let ids = self.alive_ids();
 
-        // Bud points: metamer tips bearing an active bud, with their facing dir.
-        let buds: Vec<(ModuleId, Vec3, Vec3)> = ids
-            .iter()
-            .filter_map(|&id| {
-                let n = self.node(id);
-                (n.terminal_bud || n.lateral_bud).then(|| (id, n.tip(), n.dir.normalize_or_zero()))
-            })
-            .collect();
-
-        // Spatial hash of bud points (cell = perception radius) for fast lookup.
-        let cell = p.perception_radius.max(0.25);
-        let inv = 1.0 / cell;
-        let key = |x: Vec3| (
-            (x.x * inv).floor() as i32,
-            (x.y * inv).floor() as i32,
-            (x.z * inv).floor() as i32,
-        );
-        let mut grid: HashMap<(i32, i32, i32), Vec<usize>> = HashMap::new();
-        for (bi, &(_, tip, _)) in buds.iter().enumerate() {
-            grid.entry(key(tip)).or_default().push(bi);
-        }
-        let nearby = |m: Vec3| -> Vec<usize> {
-            let (ci, cj, ck) = key(m);
-            let mut out = Vec::new();
-            for di in -1..=1 {
-                for dj in -1..=1 {
-                    for dk in -1..=1 {
-                        if let Some(v) = grid.get(&(ci + di, cj + dj, ck + dk)) {
-                            out.extend_from_slice(v);
-                        }
-                    }
-                }
+        // Growth-direction V per module: supplied (shared field) or self-colonized.
+        let local_space;
+        let space_map: &HashMap<ModuleId, Vec3> = match space {
+            Some(s) => s,
+            None => {
+                local_space = self.colonize_self();
+                &local_space
             }
-            out
         };
-
-        let occ2 = p.occupancy_radius * p.occupancy_radius;
-        let per2 = p.perception_radius * p.perception_radius;
-        let pcos = p.perception_cos;
-
-        // Reachable ceiling: markers above it are dormant (not yet available),
-        // so the tree grows up into space gradually as it ages rather than
-        // consuming the whole dome at once. A small base lets the seedling start.
-        let ceiling = self.origin.y + 2.0 * p.internode_len + self.age * p.climb_rate;
-
-        // (a) consume reached markers; (b) associate the rest to nearest bud.
-        let mut sum_dir: HashMap<ModuleId, Vec3> = HashMap::new();
-        let mut kept: Vec<Vec3> = Vec::with_capacity(self.markers.len());
-        for &m in &self.markers {
-            if m.y > ceiling {
-                kept.push(m); // dormant until the ceiling rises to it
-                continue;
-            }
-            let cand = nearby(m);
-            let mut occupied = false;
-            let mut best: Option<(ModuleId, Vec3)> = None;
-            let mut bestd = per2;
-            for &bi in &cand {
-                let (id, tip, dir) = buds[bi];
-                let d = m - tip;
-                let dist2 = d.length_squared();
-                if dist2 <= occ2 {
-                    occupied = true;
-                    break;
-                }
-                if dist2 > per2 {
-                    continue;
-                }
-                let dn = d.normalize_or_zero();
-                if dn.dot(dir) < pcos {
-                    continue; // outside the forward perception cone
-                }
-                if dist2 < bestd {
-                    bestd = dist2;
-                    best = Some((id, dn));
-                }
-            }
-            if occupied {
-                continue; // marker consumed
-            }
-            kept.push(m);
-            if let Some((id, dn)) = best {
-                *sum_dir.entry(id).or_insert(Vec3::ZERO) += dn;
-            }
-        }
-        self.markers = kept;
-
-        // Self-shading for a standalone plant (no external grid): the plant
-        // shades its own buds, so an isolated tree self-thins and clears a bole
-        // too. In the ecosystem qg already encodes self + neighbour shade.
+        // Light g: supplied global shadow, else self-shadow (standalone plant).
         let self_g = if qg.is_none() { Some(self.self_shadow()) } else { None };
 
-        // (c) set Q (space × light), the growth direction, and record the
-        //     current light level (the actual light g, independent of free
-        //     space — a metamer's foliage is lit even where no markers remain;
-        //     this is what shedding reads).
         for &id in &ids {
             let g = qg
                 .and_then(|map| map.get(&id).copied())
@@ -401,10 +331,10 @@ impl Plant {
                 .unwrap_or(1.0);
             let light = stol + (1.0 - stol) * g;
             self.node_mut(id).light_level = light;
-            match sum_dir.get(&id) {
+            match space_map.get(&id) {
                 Some(v) => {
                     self.node_mut(id).q_bud = light;
-                    self.node_mut(id).v_grow = v.normalize_or_zero();
+                    self.node_mut(id).v_grow = *v;
                 }
                 None => {
                     self.node_mut(id).q_bud = 0.0;
@@ -412,6 +342,60 @@ impl Plant {
                 }
             }
         }
+    }
+
+    /// Active-bud tips (module id, position, facing direction) — what the
+    /// ecosystem gathers to colonize the shared marker field.
+    pub fn active_buds(&self) -> Vec<(ModuleId, Vec3, Vec3)> {
+        self.alive_ids()
+            .into_iter()
+            .filter_map(|id| {
+                let n = self.node(id);
+                (n.terminal_bud || n.lateral_bud).then(|| (id, n.tip(), n.dir.normalize_or_zero()))
+            })
+            .collect()
+    }
+
+    /// Reachable-marker ceiling: rises with age (gradual bottom-up growth) but
+    /// caps at the species height (envelope_height), so a tree stops growing up
+    /// at its genetic maximum even in a tall shared marker field — this keeps
+    /// species height differentiation in the ecosystem.
+    pub fn reveal_ceiling(&self) -> f32 {
+        let rise = 2.0 * self.params.internode_len + self.age * self.params.climb_rate;
+        self.origin.y + rise.min(self.params.envelope_height + self.params.internode_len)
+    }
+
+    pub fn clear_markers(&mut self) {
+        self.markers.clear();
+    }
+
+    /// Colonize the plant's OWN private marker dome (standalone mode), consuming
+    /// reached markers; returns the per-module growth direction V.
+    fn colonize_self(&mut self) -> HashMap<ModuleId, Vec3> {
+        let p = self.params.clone();
+        let ceiling = self.reveal_ceiling();
+        let crown_r = p.envelope_radius + p.internode_len;
+        let origin = self.origin;
+        let active = self.active_buds();
+        let buds: Vec<BudQuery> = active
+            .iter()
+            .map(|&(_, pos, dir)| BudQuery { pos, dir, ceiling, center: origin, crown_r })
+            .collect();
+        let vs = colonize(
+            &mut self.markers,
+            Occ::Consume,
+            &buds,
+            p.occupancy_radius,
+            p.perception_radius,
+            p.perception_cos,
+        );
+        let mut out = HashMap::new();
+        for (i, v) in vs.into_iter().enumerate() {
+            if let Some(dir) = v {
+                out.insert(active[i].0, dir);
+            }
+        }
+        out
     }
 
     /// Per-internode self-shadow light for a standalone plant: a downward
@@ -946,6 +930,157 @@ fn generate_markers(origin: Vec3, radius: f32, height: f32, count: usize) -> Vec
     out
 }
 
+/// A small spatial hash over points (cell-bucketed indices) for near-linear
+/// neighbour queries during space colonization.
+struct PointGrid {
+    inv: f32,
+    cells: HashMap<(i32, i32, i32), Vec<usize>>,
+}
+impl PointGrid {
+    fn new(pts: &[Vec3], cell: f32) -> Self {
+        let inv = 1.0 / cell.max(0.1);
+        let mut cells: HashMap<(i32, i32, i32), Vec<usize>> = HashMap::new();
+        for (i, &p) in pts.iter().enumerate() {
+            cells.entry(grid_key(p, inv)).or_default().push(i);
+        }
+        PointGrid { inv, cells }
+    }
+    /// Visit every stored index in the 3×3×3 block around `m`.
+    fn for_near(&self, m: Vec3, mut f: impl FnMut(usize)) {
+        let (ci, cj, ck) = grid_key(m, self.inv);
+        for di in -1..=1 {
+            for dj in -1..=1 {
+                for dk in -1..=1 {
+                    if let Some(v) = self.cells.get(&(ci + di, cj + dj, ck + dk)) {
+                        for &i in v {
+                            f(i);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+fn grid_key(p: Vec3, inv: f32) -> (i32, i32, i32) {
+    ((p.x * inv).floor() as i32, (p.y * inv).floor() as i32, (p.z * inv).floor() as i32)
+}
+
+/// Space-colonization core (Pałubicki §4.1), persistent-field variant. The
+/// `markers` are NOT consumed: each call recomputes, per marker, whether it is
+/// *occupied* (within ρ of any current `occupiers` = wood) and, if free,
+/// associates it to the nearest `bud` that perceives it (within r, a forward
+/// cone cos ≥ pcos, and below that bud's reveal ceiling). Returns per bud
+/// Some(V) — the normalized sum of directions to the markers it captured — or
+/// None.
+///
+/// Persistence (occupancy vs current wood, not deletion) is what makes the field
+/// regenerate: when a plant dies its wood vanishes, reopening its space for
+/// neighbours and recruits. Shared by a standalone plant (its own dome) and the
+/// ecosystem (one field for the whole stand → genuine competition for space).
+/// A bud as seen by space colonization: its tip `pos` and facing `dir`, the
+/// `ceiling` (max reachable height) and a crown bound — markers beyond
+/// `crown_r` horizontally from `center` are out of this tree's crown, so it
+/// fills a species-sized cylinder and competes with neighbours in overlaps
+/// rather than racing into open space with a bare limb.
+pub(crate) struct BudQuery {
+    pub pos: Vec3,
+    pub dir: Vec3,
+    pub ceiling: f32,
+    pub center: Vec3,
+    pub crown_r: f32,
+}
+
+/// How a marker becomes unavailable.
+pub(crate) enum Occ<'a> {
+    /// Standalone tree: markers within ρ of a bud are CONSUMED (removed from the
+    /// dome). The depletion both advances the frontier and bounds the tree.
+    Consume,
+    /// Shared stand: occupancy is recomputed each step against current `wood`
+    /// (markers persist), so a dead plant's wood vanishing frees its space.
+    Wood(&'a [Vec3]),
+}
+
+pub(crate) fn colonize(
+    markers: &mut Vec<Vec3>,
+    occ: Occ,
+    buds: &[BudQuery],
+    occ_r: f32,
+    per_r: f32,
+    pcos: f32,
+) -> Vec<Option<Vec3>> {
+    let bud_pts: Vec<Vec3> = buds.iter().map(|b| b.pos).collect();
+    let bgrid = PointGrid::new(&bud_pts, per_r);
+    let occ_inv = 1.0 / occ_r.max(0.1);
+    let occ2 = occ_r * occ_r;
+    let per2 = per_r * per_r;
+    // Wood occupancy as a voxel set (cell ≈ ρ): O(1) per marker.
+    let wood_cells: HashSet<(i32, i32, i32)> = match &occ {
+        Occ::Wood(w) => w.iter().map(|&p| grid_key(p, occ_inv)).collect(),
+        Occ::Consume => HashSet::new(),
+    };
+    let consume = matches!(occ, Occ::Consume);
+    let mut sum = vec![Vec3::ZERO; buds.len()];
+    let mut has = vec![false; buds.len()];
+    let mut kept = Vec::with_capacity(markers.len());
+    for &m in markers.iter() {
+        let occupied = match &occ {
+            Occ::Wood(_) => wood_cells.contains(&grid_key(m, occ_inv)),
+            Occ::Consume => {
+                let mut o = false;
+                bgrid.for_near(m, |bi| {
+                    let b = &buds[bi];
+                    if !o && m.y <= b.ceiling && (m - b.pos).length_squared() <= occ2 {
+                        o = true;
+                    }
+                });
+                o
+            }
+        };
+        if occupied {
+            continue; // Consume: dropped (not kept) → deleted. Wood: persists.
+        }
+        if consume {
+            kept.push(m); // free markers persist until reached
+        }
+        // Perception: associate to the nearest bud that perceives this marker.
+        let mut best: Option<usize> = None;
+        let mut best_dn = Vec3::ZERO;
+        let mut bestd = per2;
+        bgrid.for_near(m, |bi| {
+            let b = &buds[bi];
+            if m.y > b.ceiling {
+                return;
+            }
+            let (hx, hz) = (m.x - b.center.x, m.z - b.center.z);
+            if hx * hx + hz * hz > b.crown_r * b.crown_r {
+                return; // outside this tree's crown cylinder
+            }
+            let d = m - b.pos;
+            let dist2 = d.length_squared();
+            if dist2 > per2 || dist2 < 1e-9 {
+                return;
+            }
+            let dn = d.normalize_or_zero();
+            if dn.dot(b.dir) < pcos {
+                return;
+            }
+            if dist2 < bestd {
+                bestd = dist2;
+                best = Some(bi);
+                best_dn = dn;
+            }
+        });
+        if let Some(bi) = best {
+            sum[bi] += best_dn;
+            has[bi] = true;
+        }
+    }
+    if consume {
+        *markers = kept;
+    }
+    (0..buds.len()).map(|i| has[i].then(|| sum[i].normalize_or_zero())).collect()
+}
+
 /// Volume of the intersection (lens) of two spheres.
 pub fn sphere_intersection_volume(a: BSphere, b: BSphere) -> f32 {
     let d = (a.centre - b.centre).length();
@@ -1027,7 +1162,7 @@ mod tests {
         // Borchert–Honda is a partition: at each internode the resource routed
         // out (to children + active buds) equals the resource that reached it.
         let mut plant = grow(0.55, 40);
-        plant.environment(None);
+        plant.environment(None, None);
         plant.light_pass();
         plant.vigor_pass();
         for id in plant.alive_ids() {
@@ -1061,7 +1196,7 @@ mod tests {
             let mut params = PlantParams::default();
             params.lambda = lambda;
             let mut plant = Plant::new(params, Vec3::ZERO);
-            plant.environment(None);
+            plant.environment(None, None);
             plant.light_pass();
             plant.vigor_pass();
             let n = plant.node(plant.root);
@@ -1076,7 +1211,7 @@ mod tests {
     fn light_accumulates_basipetally_to_the_root() {
         // Q_acc(root) must equal the sum of every internode's bud light Q_self.
         let mut plant = grow(0.55, 40);
-        plant.environment(None);
+        plant.environment(None, None);
         plant.light_pass();
         let total: f32 = plant.alive_ids().iter().map(|&id| plant.q_self(id)).sum();
         let root_acc = plant.node(plant.root).q_acc;
@@ -1165,7 +1300,7 @@ mod tests {
                 plant.params.marker_count,
             );
             plant.markers = generate_markers(plant.origin, r, h, c);
-            plant.environment(None);
+            plant.environment(None, None);
             plant.light_pass();
             plant.vigor_pass();
             plant.node(plant.root).vigor

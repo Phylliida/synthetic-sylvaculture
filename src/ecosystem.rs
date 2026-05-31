@@ -4,8 +4,16 @@
 //! each an independent growth simulation, rendered as one combined mesh.
 //! Global shadowing, seeding, and climate arrive in later stages.
 
-use crate::plant::{ModuleId, Plant, Segment};
+use crate::plant::{colonize, BudQuery, ModuleId, Occ, Plant, Segment};
 use crate::species::{self, Species};
+
+/// Shared marker field: vertical extent and density (markers per unit volume).
+const MAX_FIELD_HEIGHT: f32 = 26.0;
+const FIELD_DENSITY: f32 = 0.6;
+/// Space-colonization radii for the shared field (match PlantParams defaults).
+const OCC_R: f32 = 1.1;
+const PER_R: f32 = 2.8;
+const PER_COS: f32 = 0.3;
 use glam::{vec3, Vec3};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -117,6 +125,11 @@ pub struct Ecosystem {
     pub climate: Climate,
     /// Population cap (for interactive performance).
     pub max_plants: usize,
+    /// Shared free-space marker field for space colonization (Pałubicki §4.1):
+    /// all plants' buds compete for these, so crowding genuinely shapes tree
+    /// size and survivors expand into the space freed when neighbours die.
+    /// Persistent (occupancy is recomputed vs current wood, not deleted).
+    markers: Vec<Vec3>,
     rng: ChaCha8Rng,
 }
 
@@ -164,19 +177,27 @@ impl Ecosystem {
             seeding_enabled: true,
             climate,
             max_plants: 170,
+            markers: Vec::new(),
             rng,
         };
 
+        // Shared free-space field over the plot (a box up to MAX_FIELD_HEIGHT).
+        // Density is modest for performance; the stand competes for these points.
+        let max_h = MAX_FIELD_HEIGHT;
+        let count = (FIELD_DENSITY * (2.0 * size) * (2.0 * size) * max_h) as usize;
+        for _ in 0..count {
+            let x = eco.rng.gen_range(-size..size);
+            let z = eco.rng.gen_range(-size..size);
+            let y = eco.rng.gen_range(0.0..max_h);
+            eco.markers.push(vec3(x, y, z));
+        }
+
+        // Initial even-aged cohort (age variety later emerges from seeding).
         for _ in 0..n {
             let x = eco.rng.gen_range(-size..size);
             let z = eco.rng.gen_range(-size..size);
             let si = eco.pick_species_for_climate();
-            let mut plant = eco.make_plant_of(si, vec3(x, 0.0, z));
-            // Stagger ages so the stand is not perfectly synchronized.
-            let head_start = eco.rng.gen_range(0..50);
-            for _ in 0..head_start {
-                plant.step(1.0);
-            }
+            let plant = eco.make_plant_of(si, vec3(x, 0.0, z));
             eco.plants.push(plant);
             eco.species_idx.push(si);
         }
@@ -185,12 +206,16 @@ impl Ecosystem {
 
     /// Build a plant of species `si` at `pos`, with its growth potential scaled
     /// by climate adaptation o (Eq. 11) — poorly-adapted species barely grow.
+    /// Its private marker dome is cleared: in the ecosystem it grows in the
+    /// shared field instead.
     fn make_plant_of(&self, si: usize, pos: Vec3) -> Plant {
         let sp = &self.species[si];
         let o = sp.adaptation(self.climate.temp, self.climate.precip);
         let mut params = sp.params.clone();
         params.v_root_max *= o; // total growth potential scales with adaptation
-        Plant::new(params, pos)
+        let mut plant = Plant::new(params, pos);
+        plant.clear_markers();
+        plant
     }
 
     /// Pick a species with probability proportional to its climate adaptation,
@@ -215,28 +240,55 @@ impl Ecosystem {
     pub fn step(&mut self, dt: f32) {
         self.age += dt;
 
-        // --- growth ---
-        if self.shadow_enabled {
-            // 1. Deposit every module's shadow into a shared grid.
-            let mut grid = ShadowGrid::new(self.size, 45.0, 1.5);
-            for p in &self.plants {
-                for (_, c) in p.module_centres() {
-                    grid.deposit(c);
+        // --- 1. shared space colonization: all plants' buds compete for the one
+        // marker field. Occupancy is recomputed vs current wood (so dead trees
+        // free their space); each free marker goes to the nearest perceiving bud.
+        // Per-plant internode centres, computed once and reused (wood occupancy,
+        // shadow deposition, and the g lookup).
+        let centres: Vec<Vec<(ModuleId, Vec3)>> =
+            self.plants.iter().map(|p| p.module_centres()).collect();
+
+        let mut bud_keys: Vec<(usize, ModuleId)> = Vec::new();
+        let mut buds: Vec<BudQuery> = Vec::new();
+        let mut wood: Vec<Vec3> = Vec::new();
+        for (pi, p) in self.plants.iter().enumerate() {
+            let ceiling = p.reveal_ceiling();
+            let crown_r = p.params.envelope_radius + p.params.internode_len;
+            for (id, pos, dir) in p.active_buds() {
+                bud_keys.push((pi, id));
+                buds.push(BudQuery { pos, dir, ceiling, center: p.origin, crown_r });
+            }
+            wood.extend(centres[pi].iter().map(|(_, c)| *c));
+        }
+        let vs = colonize(&mut self.markers, Occ::Wood(&wood), &buds, OCC_R, PER_R, PER_COS);
+        let mut space: Vec<HashMap<ModuleId, Vec3>> = vec![HashMap::new(); self.plants.len()];
+        for (i, v) in vs.into_iter().enumerate() {
+            if let Some(dir) = v {
+                let (pi, id) = bud_keys[i];
+                space[pi].insert(id, dir);
+            }
+        }
+
+        // --- 2. global shadow grid → per-module light g (inter-plant shading).
+        let grid = if self.shadow_enabled {
+            let mut g = ShadowGrid::new(self.size, MAX_FIELD_HEIGHT, 1.5);
+            for plant_centres in &centres {
+                for (_, c) in plant_centres {
+                    g.deposit(*c);
                 }
             }
-            // 2. Each plant reads its per-module global-shadow light and grows.
-            for p in &mut self.plants {
-                let qg: HashMap<ModuleId, f32> = p
-                    .module_centres()
-                    .into_iter()
-                    .map(|(id, c)| (id, grid.light_at(c)))
-                    .collect();
-                p.step_shaded(dt, &qg);
-            }
+            Some(g)
         } else {
-            for p in &mut self.plants {
-                p.step(dt);
-            }
+            None
+        };
+
+        // --- 3. grow each plant in the shared field.
+        for (pi, p) in self.plants.iter_mut().enumerate() {
+            let qg: HashMap<ModuleId, f32> = centres[pi]
+                .iter()
+                .map(|(id, c)| (*id, grid.as_ref().map(|g| g.light_at(*c)).unwrap_or(1.0)))
+                .collect();
+            p.step_in_field(dt, &qg, &space[pi]);
         }
 
         self.cull_dead();

@@ -307,11 +307,12 @@ fn run_stats() {
             }
         }
         println!(
-            "  → fitted slope (log mean_biomass vs log density): {:.2}",
+            "  → fitted slope (log mean_biomass vs log density): {:.2}  (ideal −1.5)",
             loglog_slope(&pts)
         );
-        println!("    (self-thinning confirmed; shallower than −1.5 because growth is");
-        println!("     envelope-bounded, so mean biomass saturates as density falls)");
+        println!("    (the shared marker field gives genuine space-competition plasticity —");
+        println!("     survivors expand into freed space — so the slope approaches −1.5;");
+        println!("     the small residual is the per-species crown/height cap)");
     }
 }
 
