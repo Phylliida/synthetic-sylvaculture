@@ -111,6 +111,11 @@ pub struct PlantParams {
     /// Perception cone: a marker counts only if cos(angle to the bud's facing)
     /// ≥ this (≈ a 70–90° forward cone).
     pub perception_cos: f32,
+    /// Vertical growth rate: the reachable-marker "ceiling" rises this many
+    /// world-units per step, so the tree fills its envelope gradually (bottom-up,
+    /// like a crown rising with age) instead of consuming the whole cloud at
+    /// once. Lower = slower, more watchable growth; the final form is unchanged.
+    pub climb_rate: f32,
     /// Hard cap on internode count (bounds geometry / performance).
     pub max_modules: usize,
 }
@@ -137,6 +142,7 @@ impl Default for PlantParams {
             occupancy_radius: 1.1,
             perception_radius: 2.8,
             perception_cos: 0.3, // ≈ 72° half-angle forward cone
+            climb_rate: 0.3,
             max_modules: 4000,
         }
     }
@@ -325,10 +331,19 @@ impl Plant {
         let per2 = p.perception_radius * p.perception_radius;
         let pcos = p.perception_cos;
 
+        // Reachable ceiling: markers above it are dormant (not yet available),
+        // so the tree grows up into space gradually as it ages rather than
+        // consuming the whole dome at once. A small base lets the seedling start.
+        let ceiling = self.origin.y + 2.0 * p.internode_len + self.age * p.climb_rate;
+
         // (a) consume reached markers; (b) associate the rest to nearest bud.
         let mut sum_dir: HashMap<ModuleId, Vec3> = HashMap::new();
         let mut kept: Vec<Vec3> = Vec::with_capacity(self.markers.len());
         for &m in &self.markers {
+            if m.y > ceiling {
+                kept.push(m); // dormant until the ceiling rises to it
+                continue;
+            }
             let cand = nearby(m);
             let mut occupied = false;
             let mut best: Option<(ModuleId, Vec3)> = None;
