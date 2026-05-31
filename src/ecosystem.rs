@@ -8,7 +8,7 @@ use crate::plant::{colonize, BudQuery, ModuleId, Occ, Plant, Segment};
 use crate::species::{self, Species};
 
 /// Shared marker field: vertical extent and density (markers per unit volume).
-const MAX_FIELD_HEIGHT: f32 = 26.0;
+const MAX_FIELD_HEIGHT: f32 = 34.0;
 const FIELD_DENSITY: f32 = 0.6;
 /// Space-colonization radii for the shared field (match PlantParams defaults).
 const OCC_R: f32 = 1.1;

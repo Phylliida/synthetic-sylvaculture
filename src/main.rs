@@ -354,10 +354,11 @@ fn render_shot(context: &Context, eco: &Ecosystem, climate: Climate, w: u32, h: 
     let target = RenderTarget::new(color.as_color_target(None), depth.as_depth_target());
     let viewport = Viewport { x: 0, y: 0, width: w, height: h };
 
+    let d = eco.size * 2.8;
     let camera = Camera::new_perspective(
         viewport,
-        vec3(40.0, 26.0, 40.0),
-        vec3(0.0, 6.0, 0.0),
+        vec3(d, eco.size * 1.8, d),
+        vec3(0.0, eco.size * 0.6, 0.0),
         vec3(0.0, 1.0, 0.0),
         degrees(45.0),
         0.1,
@@ -415,7 +416,7 @@ fn run_shot() {
     let context = window.gl();
 
     let climate = Climate { temp, precip };
-    let mut eco = Ecosystem::new(40, 14.0, 7, climate);
+    let mut eco = Ecosystem::new(40, 22.0, 7, climate);
     for _ in 0..steps {
         eco.step(1.0);
     }
@@ -543,8 +544,8 @@ fn run_ecosystem() {
 
     let mut camera = Camera::new_perspective(
         window.viewport(),
-        vec3(40.0, 26.0, 40.0),
-        vec3(0.0, 6.0, 0.0),
+        vec3(62.0, 40.0, 62.0),
+        vec3(0.0, 14.0, 0.0),
         vec3(0.0, 1.0, 0.0),
         degrees(45.0),
         0.1,
@@ -556,7 +557,7 @@ fn run_ecosystem() {
     let key = DirectionalLight::new(&context, 2.6, Srgba::new(255, 247, 230, 255), vec3(-0.5, -1.0, -0.7));
     let fill = DirectionalLight::new(&context, 0.9, Srgba::new(180, 200, 255, 255), vec3(0.8, -0.4, 0.5));
 
-    let eco_size = 14.0f32;
+    let eco_size = 22.0f32;
     let plant_count = 40;
     let mut seed = 7u64;
     let mut climate = Climate { temp: 10.0, precip: 90.0 };

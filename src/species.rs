@@ -107,17 +107,27 @@ pub fn library() -> Vec<Species> {
     vec![
         species(
             "conifer (spruce-like)",
-            // Excurrent: high apical control λ, narrow whorls (high D), gentle
-            // droop (g2). The conical spire emerges; no per-species hacks.
-            preset(0.53, 0.72, 1.0, 150.0, -0.22, 0.60, 0.050, 18.0, 3.0),
+            // Tall conical canopy spire: high λ, narrow whorls, gentle droop,
+            // with the budget to reach the canopy and thicken (trunk ∝ √leaves).
+            PlantParams {
+                max_modules: 2000,
+                marker_count: 2000,
+                v_root_max: 180.0,
+                ..preset(0.55, 0.72, 1.0, 180.0, -0.22, 0.60, 0.058, 28.0, 3.2)
+            },
             (42, 92, 56), (96, 70, 52),
             2.0, 80.0, 11.0, 90.0, 80.0, 5.0, 0.030, 250.0,
         ),
         species(
             "poplar (columnar)",
-            // More excurrent still, narrow near-vertical laterals (high D),
-            // little droop — a slender column emerges from λ/D/g2 alone.
-            preset(0.55, 0.85, 1.0, 120.0, -0.05, 0.20, 0.050, 24.0, 2.4),
+            // Tall slender column; raised module budget so it thickens with age
+            // rather than staying a thin whip.
+            PlantParams {
+                max_modules: 1600,
+                marker_count: 1600,
+                v_root_max: 150.0,
+                ..preset(0.55, 0.85, 1.0, 150.0, -0.05, 0.20, 0.052, 30.0, 2.6)
+            },
             (112, 168, 72), (122, 112, 92),
             13.0, 95.0, 10.0, 80.0, 55.0, 8.0, 0.055, 150.0,
         ),
@@ -150,7 +160,15 @@ pub fn library() -> Vec<Species> {
         ),
         species(
             "tropical broadleaf",
-            preset(0.50, 0.45, 1.0, 130.0, -0.20, 0.55, 0.052, 14.0, 5.5),
+            // Canopy giant: tall (envelope 30), excurrent enough to rise into a
+            // canopy, with the module budget + denser dome + larger φ needed to
+            // accumulate the leaves a thick trunk requires (trunk ∝ √leaves).
+            PlantParams {
+                max_modules: 2500,
+                marker_count: 2500,
+                v_root_max: 200.0,
+                ..preset(0.55, 0.45, 1.0, 200.0, -0.20, 0.55, 0.060, 30.0, 6.0)
+            },
             (54, 150, 58), (95, 75, 55),
             26.0, 320.0, 8.0, 120.0, 60.0, 6.0, 0.055, 300.0,
         ),
