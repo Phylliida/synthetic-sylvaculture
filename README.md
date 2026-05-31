@@ -60,7 +60,22 @@ Pipe Model yields a trunk thicker than its twigs. (See `cargo test`.)
   shrub tundra, temperate → poplar forest, warm/wet → oak). ←/→/↑/↓ set the
   climate; a Whittaker-style label names the biome
 - Validated in `--stats`: shadowing −65% biomass, succession over 360 steps,
-  biome dominants across three climates. 10 tests pass.
+  biome dominants across three climates.
+
+**Milestone 5 — tree shape + crown tuning (done).**
+- Per-species φ → trunks thicken with size (Pipe Model) and vary by species
+- Straight leaders (the apical terminal is always vertical; excurrent/decurrent
+  comes from the λ vigor split), so no banana/loop trunks
+- Growth-rate floor (`growth_floor`) lets low-vigor laterals develop into real
+  branches, so tall (high-λ) trees grow a crown instead of a bare pole →
+  **canopy layering**: tall conifers/poplars emerge over a leafy understory.
+  Per-plant `max_modules` cap keeps the forest geometry bounded
+- Shape metrics on `Plant::shape()` (height, crown spread, apex-lean) + a
+  `--stats` morphology/forest-arc readout used as a tuning harness; tests pin
+  the expected look (excurrent tower over broad, every species has a crown, no
+  banana trunks, trunk thickens with size, plausible slenderness). 20 tests.
+- `--shot <file.png> --temp T --precip P --steps N` renders a frame off-screen
+  to a PNG for visual inspection.
 
 ## Running
 

@@ -45,6 +45,14 @@ pub struct PlantParams {
     pub v_max: f32,
     /// Module physiological age at which it is fully developed (a_mature).
     pub a_mature: f32,
+    /// Growth-rate floor in [0,1]: a living module develops at no less than this
+    /// fraction of the full rate regardless of vigor (Eq. 5 becomes
+    /// ϒ = gp·(floor + (1−floor)·S)). >0 lets low-vigor laterals fill into real
+    /// branches instead of crawling, so a tall (high-λ) tree grows a crown
+    /// rather than a bare pole. 0 = the literal sigmoid.
+    pub growth_floor: f32,
+    /// Hard cap on modules per plant (safety bound on crown size / geometry).
+    pub max_modules: usize,
     /// Branch length scaling coefficient (β, Eq. 9).
     pub beta: f32,
     /// Maximum branch-segment length (ℓmax, Eq. 9).
@@ -109,6 +117,8 @@ impl Default for PlantParams {
             v_min: 1.0,
             v_max: 100.0,
             a_mature: 1.0,
+            growth_floor: 0.0,
+            max_modules: usize::MAX,
             beta: 1.0,
             l_max: 1.2,
             phi: 0.02,
@@ -364,13 +374,17 @@ impl Plant {
             let v = self.module(id).vigor;
             let x = ((v - p.v_min) / (p.v_max - p.v_min)).clamp(0.0, 1.0);
             let s = 3.0 * x * x - 2.0 * x * x * x; // sigmoid S(x)
-            let growth_rate = s * p.gp;
+            // Growth-rate floor lets low-vigor laterals develop (fuller crowns).
+            let growth_rate = p.gp * (p.growth_floor + (1.0 - p.growth_floor) * s);
             let m = self.module_mut(id);
             m.age = (m.age + growth_rate * dt).min(p.a_mature);
         }
 
-        // Attach new modules at mature, unoccupied terminals.
+        // Attach new modules at mature, unoccupied terminals (until the cap).
         for &id in &ids {
+            if self.module_count() >= p.max_modules {
+                break;
+            }
             if !self.module(id).is_mature(&p) {
                 continue;
             }

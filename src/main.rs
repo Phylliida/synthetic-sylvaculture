@@ -148,10 +148,13 @@ fn run_stats() {
         );
     }
 
-    println!("\ntree morphology (each species grown solo 150 steps):");
+    println!("\ntree morphology (each species grown solo to ~70% of its lifespan):");
     for sp in species::library() {
+        // Measure within the species' lifespan, not past senescence (e.g. the
+        // short-lived shrub would otherwise be shown as a dying stump).
+        let steps = ((0.7 * sp.params.p_max) as u32).min(150);
         let mut plant = make_plant(sp.params.clone());
-        for _ in 0..150 {
+        for _ in 0..steps {
             plant.step(1.0);
         }
         let segs = plant.skeleton();

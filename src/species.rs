@@ -61,6 +61,10 @@ fn preset(
         // branching forever, bounding tree size (and thus trunk thickness) by
         // vigor rather than by simulation time.
         v_min: 2.5,
+        // Let low-vigor laterals develop so a tall (high-λ) tree grows a crown
+        // rather than a bare pole; cap modules so a stand's geometry stays bounded.
+        growth_floor: 0.35,
+        max_modules: 150,
         beta,
         g2,
         shade_tolerance,
@@ -113,13 +117,13 @@ pub fn library() -> Vec<Species> {
     vec![
         species(
             "conifer (spruce-like)",
-            preset(0.55, 0.90, 0.25, 90.0, 1.0, -0.20, 0.60, 0.055),
+            preset(0.68, 0.90, 0.25, 105.0, 1.0, -0.20, 0.60, 0.040),
             (42, 92, 56), (96, 70, 52),
             2.0, 80.0, 11.0, 90.0, 80.0, 5.0, 0.030, 250.0,
         ),
         species(
             "poplar (columnar)",
-            preset(0.52, 0.72, 0.34, 85.0, 1.1, -0.15, 0.20, 0.060),
+            preset(0.70, 0.80, 0.34, 95.0, 1.1, -0.15, 0.20, 0.045),
             (112, 168, 72), (122, 112, 92),
             13.0, 95.0, 10.0, 80.0, 55.0, 8.0, 0.055, 150.0,
         ),
@@ -131,7 +135,7 @@ pub fn library() -> Vec<Species> {
         ),
         species(
             "oak (broad)",
-            preset(0.42, 0.30, 0.30, 90.0, 1.15, -0.30, 0.45, 0.070),
+            preset(0.42, 0.30, 0.30, 68.0, 1.15, -0.30, 0.45, 0.050),
             (80, 130, 55), (92, 72, 55),
             15.0, 115.0, 10.0, 90.0, 70.0, 5.0, 0.035, 320.0,
         ),
@@ -197,18 +201,17 @@ mod tests {
     // with comfortable margins.
 
     #[test]
-    fn conifer_is_tallest_and_narrowest() {
-        let conifer = grow_solo(0, 150);
-        let ch = conifer.shape().0;
-        // The conifer should be the tallest species and narrower (lower spread)
-        // than the broad oak — the excurrent-vs-decurrent contrast.
-        for idx in 1..library().len() {
-            assert!(
-                ch >= grow_solo(idx, 150).shape().0 - 0.5,
-                "conifer ({ch:.1}) should be ~tallest; species {idx} taller"
-            );
-        }
-        assert!(spread(&conifer) < spread(&grow_solo(3, 150)), "conifer should be narrower than oak");
+    fn excurrent_species_tower_over_broad_ones() {
+        // The excurrent species (conifer, poplar) should be much taller AND
+        // narrower than the broad decurrent oak — the headline λ contrast.
+        let conifer = grow_solo(0, 120);
+        let poplar = grow_solo(1, 120);
+        let oak = grow_solo(3, 120);
+        let oh = oak.shape().0;
+        assert!(conifer.shape().0 > 2.0 * oh, "conifer should tower over oak ({oh:.1})");
+        assert!(poplar.shape().0 > 2.0 * oh, "poplar should tower over oak ({oh:.1})");
+        assert!(spread(&conifer) < spread(&oak), "conifer should be narrower than oak");
+        assert!(spread(&poplar) < spread(&oak), "poplar should be narrower than oak");
     }
 
     #[test]
