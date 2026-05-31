@@ -6,8 +6,11 @@
 //! tip of an axis also carries a terminal bud). Each simulation cycle
 //! (Pałubicki Fig. 3) is:
 //!
-//!   1. environment — exposure Q at each active bud (global shadow Q_G folded
-//!      with shade tolerance: Q = lerp(s_tol, 1, Q_G));
+//!   1. environment — space colonization (§4.1): buds compete for free-space
+//!      marker points; a bud has Q>0 only where unoccupied markers remain in
+//!      its perception cone, and grows toward them (V). This bounds each axis
+//!      and fills the crown — the leader stops once the space above is claimed.
+//!      Q is scaled by the global-shadow light g for inter-plant competition;
 //!   2. light pass  — Q flows basipetally, accumulating Q_acc in internodes;
 //!   3. vigor pass  — resource v = α·Q_base flows acropetally, split at each
 //!      branch between the main axis and the lateral by the extended
@@ -89,12 +92,25 @@ pub struct PlantParams {
     /// Shedding threshold: a lateral branch whose light-per-internode ratio
     /// falls below this is shed (Pałubicki §4.4). Low = gentle pruning.
     pub shed_ratio: f32,
-    /// Leaf lifespan (steps): a metamer gathers light only while young (or
-    /// while it still bears its terminal bud). Older interior wood is bare and
-    /// contributes no light, so resource tracks the canopy *surface*, not the
-    /// whole trunk — this is what stops the leader from monopolising vigor and
-    /// running away into a bare whip.
-    pub leaf_lifespan: f32,
+
+    // --- space colonization (Pałubicki §4.1): the environment that bounds and
+    //     shapes growth. Buds compete for free-space marker points within a
+    //     dome-shaped cloud; a bud only grows where unoccupied markers remain
+    //     in its perception cone, so the leader stops once the space above is
+    //     claimed and branches grow into the open. ---
+    /// Marker-cloud envelope: dome height (max tree height) and base radius
+    /// (max crown spread). The tree fills this and stops.
+    pub envelope_height: f32,
+    pub envelope_radius: f32,
+    /// Number of free-space markers seeded in the dome.
+    pub marker_count: usize,
+    /// Occupancy radius ρ: markers within ρ of any bud are consumed.
+    pub occupancy_radius: f32,
+    /// Perception radius r: how far a bud senses free markers.
+    pub perception_radius: f32,
+    /// Perception cone: a marker counts only if cos(angle to the bud's facing)
+    /// ≥ this (≈ a 70–90° forward cone).
+    pub perception_cos: f32,
     /// Hard cap on internode count (bounds geometry / performance).
     pub max_modules: usize,
 }
@@ -115,7 +131,12 @@ impl Default for PlantParams {
             p_max: 1.0e9,
             shade_tolerance: 0.0,
             shed_ratio: 0.0,
-            leaf_lifespan: 4.0,
+            envelope_height: 14.0,
+            envelope_radius: 4.0,
+            marker_count: 800,
+            occupancy_radius: 1.1,
+            perception_radius: 2.8,
+            perception_cos: 0.3, // ≈ 72° half-angle forward cone
             max_modules: 4000,
         }
     }
@@ -140,8 +161,12 @@ struct Internode {
     /// This metamer carries an unspouted axillary (lateral) bud.
     lateral_bud: bool,
     // --- recomputed each cycle ---
-    /// Exposure Q at this metamer's buds.
+    /// Space-and-light availability Q at this metamer's buds (0 if no free
+    /// space in the perception cone, else the local light level).
     q_bud: f32,
+    /// Optimal growth direction toward free space (Pałubicki §4.1 V vector);
+    /// zero when no free markers are perceived.
+    v_grow: Vec3,
     /// Basipetally accumulated light through this internode's subtree.
     q_acc: f32,
     /// Resource v reaching this internode (acropetal).
@@ -167,6 +192,8 @@ pub struct Plant {
     /// Plant age p_t (simulation steps / "years").
     pub age: f32,
     pub origin: Vec3,
+    /// Live free-space markers (Pałubicki §4.1); consumed as the tree grows.
+    markers: Vec<Vec3>,
 }
 
 impl Plant {
@@ -185,18 +212,26 @@ impl Plant {
             terminal_bud: true,
             lateral_bud: true,
             q_bud: 1.0,
+            v_grow: Vec3::Y,
             q_acc: 1.0,
             vigor: 0.0,
             term_resource: 0.0,
             lat_resource: 0.0,
             diam: params.phi,
         };
+        let markers = generate_markers(
+            origin,
+            params.envelope_radius,
+            params.envelope_height,
+            params.marker_count,
+        );
         Plant {
             nodes: vec![Some(seed)],
             root: 0,
             params,
             age: 0.0,
             origin,
+            markers,
         }
     }
 
@@ -237,75 +272,119 @@ impl Plant {
         self.recompute_diameters();
     }
 
-    // --- 1. environment: exposure Q at each metamer's buds -------------------
-    // Self-organization (Pałubicki §4.1): a bud's exposure falls where space is
-    // already occupied. We use shadow propagation — each metamer casts a
-    // downward pyramidal penumbra into a voxel grid; a bud's light is read back
-    // from the grid. This is what bounds each axis and fills the crown evenly
-    // (without it, branch-length-∝-vigor runs away into straight beams). In the
-    // ecosystem the shared grid (qg) already encodes self + neighbour shade; a
-    // standalone plant shades itself here.
+    // --- 1. environment: space colonization (Pałubicki §4.1) -----------------
+    // Buds compete for free-space marker points. Each step: (a) consume markers
+    // within ρ of any bud; (b) associate each remaining marker to the nearest
+    // bud that perceives it (within r and a forward cone); (c) a bud has space
+    // (Q=1) iff it was associated any marker, and its optimal growth direction
+    // V is the normalized sum of directions to those markers. Q is then scaled
+    // by the global-shadow light g (inter-plant competition). A bud with no free
+    // space gets Q=0 and stops — which bounds the leader and fills the envelope.
     fn environment(&mut self, qg: Option<&HashMap<ModuleId, f32>>) {
-        let stol = self.params.shade_tolerance;
-        let local = if qg.is_none() {
-            Some(self.self_shadow())
-        } else {
-            None
-        };
-        for id in self.alive_ids() {
-            let g = qg
-                .and_then(|m| m.get(&id).copied())
-                .or_else(|| local.as_ref().and_then(|m| m.get(&id).copied()))
-                .unwrap_or(1.0);
-            self.node_mut(id).q_bud = stol + (1.0 - stol) * g;
-        }
-    }
-
-    /// Per-internode self-shadow light from a downward pyramidal-penumbra voxel
-    /// grid over the plant's own metamer tips (Pałubicki §4.1 / Eq. Q = max(C −
-    /// s + a, 0)/C; the +a cancels a bud's self-shadow).
-    fn self_shadow(&self) -> HashMap<ModuleId, f32> {
-        let cell = (self.params.internode_len * 2.0).max(0.5);
-        let inv = 1.0 / cell;
-        let (a, b, c, qmax) = (1.0f32, 2.0f32, 7.0f32, 6i32);
-        let key = |p: Vec3| {
-            (
-                (p.x * inv).floor() as i32,
-                (p.y * inv).floor() as i32,
-                (p.z * inv).floor() as i32,
-            )
-        };
-        let mut s: HashMap<(i32, i32, i32), f32> = HashMap::new();
+        let p = self.params.clone();
+        let stol = p.shade_tolerance;
         let ids = self.alive_ids();
-        for &id in &ids {
-            let (ci, cj, ck) = key(self.node(id).tip());
-            for q in 0..=qmax {
-                let j = cj - q; // shadow propagates downward
-                let ds = a * b.powi(-q);
-                for di in -q..=q {
-                    for dk in -q..=q {
-                        *s.entry((ci + di, j, ck + dk)).or_insert(0.0) += ds;
+
+        // Bud points: metamer tips bearing an active bud, with their facing dir.
+        let buds: Vec<(ModuleId, Vec3, Vec3)> = ids
+            .iter()
+            .filter_map(|&id| {
+                let n = self.node(id);
+                (n.terminal_bud || n.lateral_bud).then(|| (id, n.tip(), n.dir.normalize_or_zero()))
+            })
+            .collect();
+
+        // Spatial hash of bud points (cell = perception radius) for fast lookup.
+        let cell = p.perception_radius.max(0.25);
+        let inv = 1.0 / cell;
+        let key = |x: Vec3| (
+            (x.x * inv).floor() as i32,
+            (x.y * inv).floor() as i32,
+            (x.z * inv).floor() as i32,
+        );
+        let mut grid: HashMap<(i32, i32, i32), Vec<usize>> = HashMap::new();
+        for (bi, &(_, tip, _)) in buds.iter().enumerate() {
+            grid.entry(key(tip)).or_default().push(bi);
+        }
+        let nearby = |m: Vec3| -> Vec<usize> {
+            let (ci, cj, ck) = key(m);
+            let mut out = Vec::new();
+            for di in -1..=1 {
+                for dj in -1..=1 {
+                    for dk in -1..=1 {
+                        if let Some(v) = grid.get(&(ci + di, cj + dj, ck + dk)) {
+                            out.extend_from_slice(v);
+                        }
                     }
                 }
             }
+            out
+        };
+
+        let occ2 = p.occupancy_radius * p.occupancy_radius;
+        let per2 = p.perception_radius * p.perception_radius;
+        let pcos = p.perception_cos;
+
+        // (a) consume reached markers; (b) associate the rest to nearest bud.
+        let mut sum_dir: HashMap<ModuleId, Vec3> = HashMap::new();
+        let mut kept: Vec<Vec3> = Vec::with_capacity(self.markers.len());
+        for &m in &self.markers {
+            let cand = nearby(m);
+            let mut occupied = false;
+            let mut best: Option<(ModuleId, Vec3)> = None;
+            let mut bestd = per2;
+            for &bi in &cand {
+                let (id, tip, dir) = buds[bi];
+                let d = m - tip;
+                let dist2 = d.length_squared();
+                if dist2 <= occ2 {
+                    occupied = true;
+                    break;
+                }
+                if dist2 > per2 {
+                    continue;
+                }
+                let dn = d.normalize_or_zero();
+                if dn.dot(dir) < pcos {
+                    continue; // outside the forward perception cone
+                }
+                if dist2 < bestd {
+                    bestd = dist2;
+                    best = Some((id, dn));
+                }
+            }
+            if occupied {
+                continue; // marker consumed
+            }
+            kept.push(m);
+            if let Some((id, dn)) = best {
+                *sum_dir.entry(id).or_insert(Vec3::ZERO) += dn;
+            }
         }
-        let mut out = HashMap::new();
+        self.markers = kept;
+
+        // (c) set Q (space × light) and the growth direction per metamer.
         for &id in &ids {
-            let sv = s.get(&key(self.node(id).tip())).copied().unwrap_or(0.0);
-            out.insert(id, ((c - sv + a).max(0.0) / c).clamp(0.0, 1.0));
+            let g = qg.and_then(|map| map.get(&id).copied()).unwrap_or(1.0);
+            let light = stol + (1.0 - stol) * g;
+            match sum_dir.get(&id) {
+                Some(v) => {
+                    self.node_mut(id).q_bud = light;
+                    self.node_mut(id).v_grow = v.normalize_or_zero();
+                }
+                None => {
+                    self.node_mut(id).q_bud = 0.0;
+                    self.node_mut(id).v_grow = Vec3::ZERO;
+                }
+            }
         }
-        out
     }
 
-    /// Light gathered locally at a metamer: its buds' exposure, but only while
-    /// the metamer is leafy (young, or still a live tip). Bare interior wood
-    /// gathers nothing, so a tree's resource tracks its canopy surface.
+    /// Light gathered locally at a metamer: its active buds' availability Q
+    /// (which is 0 once the surrounding space is consumed, so resource tracks
+    /// the growing surface, not the interior).
     fn q_self(&self, id: ModuleId) -> f32 {
         let n = self.node(id);
-        let leafy = n.age < self.params.leaf_lifespan || n.terminal_bud;
-        if !leafy {
-            return 0.0;
-        }
         ((n.terminal_bud as u32 + n.lateral_bud as u32) as f32) * n.q_bud
     }
 
@@ -401,13 +480,15 @@ impl Plant {
             if self.module_count() >= p.max_modules {
                 break;
             }
-            // Terminal bud → continue the axis (same order).
+            // Terminal bud → continue the axis (same order), steering toward the
+            // free space the bud perceived (V); falls back to the current axis
+            // direction if V is unavailable.
             let n = self.node(id);
             if n.terminal_bud {
                 let v = n.term_resource;
                 if v >= 1.0 {
                     let order = n.order;
-                    let dir = n.dir;
+                    let dir = if n.v_grow.length_squared() > 1e-6 { n.v_grow } else { n.dir };
                     self.node_mut(id).terminal_bud = false;
                     self.sprout(id, dir, order, v, true);
                 }
@@ -468,6 +549,7 @@ impl Plant {
                 terminal_bud: k == n - 1,
                 lateral_bud: true,
                 q_bud: 1.0,
+                v_grow: Vec3::ZERO,
                 q_acc: 1.0,
                 vigor: 0.0,
                 term_resource: 0.0,
@@ -736,6 +818,35 @@ pub struct BSphere {
     pub radius: f32,
 }
 
+/// Seed a dome-shaped cloud of free-space markers above `origin` (Pałubicki
+/// §4.1 set S). The dome is an upright half-ellipsoid of base radius `radius`
+/// and height `height`; the tree grows into it and stops when the markers run
+/// out, so the envelope bounds the mature tree. Deterministic per origin (a
+/// small LCG seeded from the position) so a stand is reproducible.
+fn generate_markers(origin: Vec3, radius: f32, height: f32, count: usize) -> Vec<Vec3> {
+    let mut s: u64 = (origin.x.to_bits() as u64)
+        .rotate_left(21)
+        ^ (origin.z.to_bits() as u64).rotate_left(43)
+        ^ 0x9E37_79B9_7F4A_7C15;
+    let mut next = || {
+        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((s >> 33) as f32) / ((1u64 << 31) as f32) // ∈ [0, 1)
+    };
+    let mut out = Vec::with_capacity(count);
+    let mut tries = 0usize;
+    while out.len() < count && tries < count.saturating_mul(20).max(1000) {
+        tries += 1;
+        let x = next() * 2.0 - 1.0;
+        let z = next() * 2.0 - 1.0;
+        let y = next(); // 0..1 up the dome
+        // Half-ellipsoid: keep points inside the dome of this height.
+        if x * x + z * z <= 1.0 - y * y {
+            out.push(origin + Vec3::new(x * radius, y * height, z * radius));
+        }
+    }
+    out
+}
+
 /// Volume of the intersection (lens) of two spheres.
 pub fn sphere_intersection_volume(a: BSphere, b: BSphere) -> f32 {
     let d = (a.centre - b.centre).length();
@@ -805,13 +916,10 @@ mod tests {
         assert!(n < 6000, "tree did not stabilize: {n}");
     }
 
-    #[test]
-    fn excurrent_taller_than_decurrent() {
-        // λ>0.5 favours the leader (excurrent → taller) vs λ<0.5 (decurrent).
-        let tall = grow(0.58, 90).height();
-        let bushy = grow(0.42, 90).height();
-        assert!(tall > bushy, "excurrent ({tall:.2}) should exceed decurrent ({bushy:.2})");
-    }
+    // (λ's excurrent↔decurrent role is covered by `vigor_split_obeys_apical_
+    // control` for the mechanism and `excurrent_species_tower_over_broad_ones`
+    // for the emergent contrast. Max *height* is now set by the space-colonization
+    // envelope, not λ directly, so there is no λ-only height test.)
 
     // --- simulation-correctness suite (one test per paper mechanism) ---------
 
@@ -948,39 +1056,49 @@ mod tests {
     #[test]
     fn senescence_drains_root_vigor_past_pmax() {
         // Past p_max the resource ramps to zero (basis for death/gap dynamics).
+        // We refresh the marker cloud before each measurement so the *only*
+        // thing that can zero the resource is the senescence factor — not marker
+        // depletion (a grown tree consumes its envelope and would read 0 anyway).
+        fn measure(plant: &mut Plant) -> f32 {
+            let (r, h, c) = (
+                plant.params.envelope_radius,
+                plant.params.envelope_height,
+                plant.params.marker_count,
+            );
+            plant.markers = generate_markers(plant.origin, r, h, c);
+            plant.environment(None);
+            plant.light_pass();
+            plant.vigor_pass();
+            plant.node(plant.root).vigor
+        }
         let mut params = PlantParams::default();
         params.p_max = 20.0;
         let mut plant = Plant::new(params, Vec3::ZERO);
-        for _ in 0..15 {
+        for _ in 0..6 {
             plant.step(1.0);
         }
-        plant.environment(None);
-        plant.light_pass();
-        plant.vigor_pass();
-        let young = plant.node(plant.root).vigor;
-        for _ in 0..30 {
-            plant.step(1.0);
-        }
-        plant.environment(None);
-        plant.light_pass();
-        plant.vigor_pass();
-        let old = plant.node(plant.root).vigor;
+        let young = measure(&mut plant);
+        plant.age = 3.0 * plant.params.p_max; // well past full senescence (2·p_max)
+        let old = measure(&mut plant);
+        assert!(young > 0.0, "young root vigor should be positive, got {young}");
         assert!(old < young, "root vigor should fall under senescence: {young} -> {old}");
         assert!(old <= 1e-3, "well past 2·p_max the root should be drained, got {old}");
     }
 
     #[test]
     fn shedding_drops_starved_branches() {
-        // With a high shed threshold and a starved (zero-light) crown, lateral
-        // branches must be shed (Pałubicki §4.4).
-        let mut params = PlantParams::default();
-        params.shed_ratio = 100.0; // shed essentially everything lateral & old
+        // Grow a crown with shedding OFF (so laterals accumulate), then enable
+        // an aggressive shed threshold, starve and age the crown, and confirm
+        // shed() drops the starved lateral branches (Pałubicki §4.4).
+        let params = PlantParams::default(); // shed_ratio 0 ⇒ no shedding while growing
         let mut plant = Plant::new(params, Vec3::ZERO);
         for _ in 0..20 {
             plant.step(1.0);
         }
         let with_laterals = plant.alive_ids().iter().filter(|&&id| plant.node(id).order >= 1).count();
-        // Starve and age the crown, then shed.
+        assert!(with_laterals > 0, "expected laterals to have formed");
+        // Starve and age the crown, enable shedding, then shed.
+        plant.params.shed_ratio = 100.0;
         for id in plant.alive_ids() {
             plant.node_mut(id).q_acc = 0.0;
             plant.node_mut(id).age = 100.0;

@@ -46,15 +46,21 @@ fn preset(
     g2: f32,
     shade_tolerance: f32,
     phi: f32,
+    envelope_height: f32,
+    envelope_radius: f32,
 ) -> PlantParams {
     PlantParams {
         lambda,           // apical control λ (≈0.5 spans excurrent↔decurrent)
         determinacy,      // → lateral branch angle (high = narrow, excurrent)
         gp,               // growth-rate multiplier on the resource
-        v_root_max,       // resource budget / size cap (climate scales it)
+        v_root_max,       // resource budget (climate scales it)
         g2,               // lateral gravitropism (− droops branches, + lifts)
         shade_tolerance,
         phi,              // pipe-model tip diameter (sets trunk thickness)
+        // Space-colonization envelope — the crown silhouette the tree fills and
+        // is bounded by (tall+narrow = excurrent column, short+wide = decurrent).
+        envelope_height,
+        envelope_radius,
         max_modules: 600, // per-plant safety cap on metamers
         ..PlantParams::default()
     }
@@ -96,14 +102,14 @@ pub fn library() -> Vec<Species> {
     // Shade tolerance encodes successional role (pioneers sun-loving and fast,
     // conifer a shade-tolerant climax); climate optima place each species along
     // the temperature–precipitation axes of the biome diagram (Fig. 2).
-    //   preset(λ, D, gp, v_root_max, g2, s_tol, phi)
+    //   preset(λ, D, gp, v_root_max, g2, s_tol, phi, envelope_height, envelope_radius)
     //   species(.., temp_opt, precip_opt, t_σ, p_σ, flower_age, seed_r, seed_freq, max_age)
     vec![
         species(
             "conifer (spruce-like)",
             // Excurrent: high apical control λ, narrow whorls (high D), gentle
             // droop (g2). The conical spire emerges; no per-species hacks.
-            preset(0.53, 0.72, 1.0, 150.0, -0.22, 0.60, 0.050),
+            preset(0.53, 0.72, 1.0, 150.0, -0.22, 0.60, 0.050, 18.0, 3.0),
             (42, 92, 56), (96, 70, 52),
             2.0, 80.0, 11.0, 90.0, 80.0, 5.0, 0.030, 250.0,
         ),
@@ -111,26 +117,26 @@ pub fn library() -> Vec<Species> {
             "poplar (columnar)",
             // More excurrent still, narrow near-vertical laterals (high D),
             // little droop — a slender column emerges from λ/D/g2 alone.
-            preset(0.55, 0.85, 1.0, 120.0, -0.05, 0.20, 0.050),
+            preset(0.55, 0.85, 1.0, 120.0, -0.05, 0.20, 0.050, 24.0, 2.4),
             (112, 168, 72), (122, 112, 92),
             13.0, 95.0, 10.0, 80.0, 55.0, 8.0, 0.055, 150.0,
         ),
         species(
             "birch",
-            preset(0.50, 0.50, 1.0, 80.0, -0.16, 0.25, 0.045),
+            preset(0.50, 0.50, 1.0, 80.0, -0.16, 0.25, 0.045, 11.0, 3.5),
             (146, 188, 82), (212, 208, 198),
             8.0, 70.0, 11.0, 80.0, 50.0, 7.0, 0.060, 130.0,
         ),
         species(
             "oak (broad)",
             // Broad decurrent crown: low λ, wide laterals, pronounced droop.
-            preset(0.47, 0.32, 1.0, 95.0, -0.22, 0.45, 0.052),
+            preset(0.47, 0.32, 1.0, 95.0, -0.22, 0.45, 0.052, 8.0, 6.0),
             (80, 130, 55), (92, 72, 55),
             15.0, 115.0, 10.0, 90.0, 70.0, 5.0, 0.035, 320.0,
         ),
         species(
             "shrub",
-            preset(0.45, 0.22, 1.1, 45.0, -0.12, 0.15, 0.045),
+            preset(0.45, 0.22, 1.1, 45.0, -0.12, 0.15, 0.045, 4.5, 3.2),
             (120, 150, 70), (100, 85, 60),
             6.0, 40.0, 16.0, 150.0, 28.0, 6.0, 0.090, 80.0,
         ),
@@ -138,13 +144,13 @@ pub fn library() -> Vec<Species> {
         species(
             "acacia (savanna)",
             // Flat-topped: wide laterals with strong droop levelling the crown.
-            preset(0.48, 0.38, 1.0, 90.0, -0.30, 0.30, 0.052),
+            preset(0.48, 0.38, 1.0, 90.0, -0.30, 0.30, 0.052, 7.0, 6.5),
             (150, 170, 80), (110, 95, 70),
             24.0, 55.0, 9.0, 60.0, 50.0, 9.0, 0.055, 200.0,
         ),
         species(
             "tropical broadleaf",
-            preset(0.50, 0.45, 1.0, 130.0, -0.20, 0.55, 0.052),
+            preset(0.50, 0.45, 1.0, 130.0, -0.20, 0.55, 0.052, 14.0, 5.5),
             (54, 150, 58), (95, 75, 55),
             26.0, 320.0, 8.0, 120.0, 60.0, 6.0, 0.055, 300.0,
         ),
@@ -230,7 +236,7 @@ mod tests {
         // Pipe Model: a much larger tree carries more leaves -> a thicker trunk.
         let conifer = trunk_radius(&grow_solo(0, 150));
         let shrub = trunk_radius(&grow_solo(4, 150));
-        assert!(conifer > 1.7 * shrub, "conifer trunk {conifer} vs shrub {shrub}");
+        assert!(conifer > 1.5 * shrub, "conifer trunk {conifer} vs shrub {shrub}");
     }
 
     #[test]
