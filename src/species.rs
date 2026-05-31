@@ -60,7 +60,7 @@ fn preset(
         // Shedding / spawn threshold: a higher floor stops low-vigor tips from
         // branching forever, bounding tree size (and thus trunk thickness) by
         // vigor rather than by simulation time.
-        v_min: 2.5,
+        v_min: 1.2,
         // Let low-vigor laterals develop so a tall (high-λ) tree grows a crown
         // rather than a bare pole; cap modules so a stand's geometry stays bounded.
         growth_floor: 0.35,
@@ -117,13 +117,28 @@ pub fn library() -> Vec<Species> {
     vec![
         species(
             "conifer (spruce-like)",
-            preset(0.68, 0.90, 0.25, 105.0, 1.0, -0.20, 0.60, 0.040),
+            // Conical spire: strong leader, many whorl laterals that splay out
+            // and droop. Lower v_min keeps the whorls dense and recursing so the
+            // base is broad; moderate upright pull keeps branches near-horizontal.
+            PlantParams {
+                l_max: 1.2,
+                omega2: 0.16,
+                v_min: 0.9,
+                growth_floor: 0.45,
+                ..preset(0.74, 0.92, 0.28, 125.0, 1.0, -0.28, 0.60, 0.040)
+            },
             (42, 92, 56), (96, 70, 52),
             2.0, 80.0, 11.0, 90.0, 80.0, 5.0, 0.030, 250.0,
         ),
         species(
             "poplar (columnar)",
-            preset(0.70, 0.80, 0.34, 95.0, 1.1, -0.15, 0.20, 0.045),
+            // Narrow column: high apical control + short, steeply-upright
+            // laterals (small ℓmax, strong upright pull ω2).
+            PlantParams {
+                l_max: 0.85,
+                omega2: 0.60,
+                ..preset(0.76, 0.82, 0.34, 95.0, 1.1, -0.12, 0.20, 0.045)
+            },
             (112, 168, 72), (122, 112, 92),
             13.0, 95.0, 10.0, 80.0, 55.0, 8.0, 0.055, 150.0,
         ),

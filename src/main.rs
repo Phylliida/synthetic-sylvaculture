@@ -417,6 +417,92 @@ fn run_shot() {
     std::process::exit(0);
 }
 
+/// `--tree <idx> [--steps N] [--shot file]`: grow ONE species solo and render
+/// it large and centred to a PNG. The single-tree tuning instrument — the
+/// ecosystem shot is too crowded to judge an individual tree's form.
+fn run_tree_shot() {
+    let args: Vec<String> = std::env::args().collect();
+    let val = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1));
+    let idx: usize = val("--tree").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let steps: u32 = val("--steps").and_then(|s| s.parse().ok()).unwrap_or(120);
+    let path = val("--shot").cloned().unwrap_or_else(|| "/tmp/tree.png".to_string());
+    let (w, h) = (900u32, 1100u32);
+
+    let window = Window::new(WindowSettings {
+        title: "tree".to_string(),
+        max_size: Some((w, h)),
+        ..Default::default()
+    })
+    .unwrap();
+    let context = window.gl();
+
+    let species = species::library();
+    let sp = &species[idx.min(species.len() - 1)];
+    let mut plant = make_plant(sp.params.clone());
+    for _ in 0..steps {
+        plant.step(1.0);
+    }
+    let (height, crown, _) = plant.shape();
+    let height = height.max(2.0);
+    let reach = crown.max(height * 0.4).max(2.0);
+
+    let color = Texture2D::new_empty::<[u8; 4]>(
+        &context, w, h, Interpolation::Linear, Interpolation::Linear, None,
+        Wrapping::ClampToEdge, Wrapping::ClampToEdge,
+    );
+    let depth = DepthTexture2D::new::<f32>(&context, w, h, Wrapping::ClampToEdge, Wrapping::ClampToEdge);
+    let target = RenderTarget::new(color.as_color_target(None), depth.as_depth_target());
+    let viewport = Viewport { x: 0, y: 0, width: w, height: h };
+
+    // Frame the whole tree: pull the camera back proportional to its extent.
+    let dist = (height.max(2.0 * reach)) * 1.5 + 4.0;
+    let camera = Camera::new_perspective(
+        viewport,
+        vec3(dist, height * 0.5, dist),
+        vec3(0.0, height * 0.5, 0.0),
+        vec3(0.0, 1.0, 0.0),
+        degrees(40.0),
+        0.1,
+        2000.0,
+    );
+    let ambient = AmbientLight::new(&context, 0.5, Srgba::new(200, 215, 255, 255));
+    let key = DirectionalLight::new(&context, 2.6, Srgba::new(255, 247, 230, 255), vec3(-0.5, -1.0, -0.7));
+    let fill = DirectionalLight::new(&context, 0.9, Srgba::new(180, 200, 255, 255), vec3(0.8, -0.4, 0.5));
+
+    let mut ground = Gm::new(
+        Mesh::new(&context, &CpuMesh::square()),
+        PhysicalMaterial::new_opaque(&context, &CpuMaterial { albedo: Srgba::new(70, 105, 58, 255), ..Default::default() }),
+    );
+    ground.set_transformation(Mat4::from_angle_x(degrees(-90.0)) * Mat4::from_scale(40.0));
+
+    let tree = Gm::new(
+        Mesh::new(&context, &mesh::build_tree_mesh(&plant.skeleton(), 10)),
+        make_bark(&context, sp.bark_rgb),
+    );
+    let foliage = Gm::new(
+        Mesh::new(&context, &mesh::build_foliage_mesh(&plant.leaves(), 0.4, 6)),
+        make_leaf(&context, sp.leaf_rgb),
+    );
+
+    target.clear(ClearState::color_and_depth(0.62, 0.74, 0.90, 1.0, 1.0));
+    target.render(&camera, ground.into_iter().chain(&tree).chain(&foliage), &[&ambient, &key, &fill]);
+    let pixels = target.read_color::<[u8; 4]>();
+
+    let mut img = image::RgbaImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            img.put_pixel(x, y, image::Rgba(pixels[(y * w + x) as usize]));
+        }
+    }
+    img.save(&path).unwrap();
+    println!(
+        "wrote {path}  ({}, {} steps → {} modules, h {:.1}, crown {:.1}, {} leaves)",
+        sp.name, steps, plant.module_count(), height, crown, plant.leaves().len()
+    );
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+    std::process::exit(0);
+}
+
 /// Ecosystem viewer: a stand of mixed-species plants growing together on flat
 /// ground, rendered as one combined per-species-coloured mesh. `--eco`.
 fn run_ecosystem() {
@@ -623,6 +709,10 @@ fn run_ecosystem() {
 fn main() {
     if std::env::args().any(|a| a == "--stats") {
         run_stats();
+        return;
+    }
+    if std::env::args().any(|a| a == "--tree") {
+        run_tree_shot();
         return;
     }
     if std::env::args().any(|a| a == "--shot") {
