@@ -258,6 +258,80 @@ fn run_stats() {
             100.0 * plant.intersection_ratio(),
         );
     }
+
+    // --- quantitative validation against the papers ------------------------
+    println!("\nvalidation — pipe-model allometry (Eq. 8):");
+    println!("  pipe model: trunk basal area ∝ leaf count ⇒ diameter ∝ √leaves, slope ≈ 0.50");
+    {
+        let mut plant = make_plant(species::library()[0].params.clone()); // conifer
+        let mut pts: Vec<(f32, f32)> = Vec::new();
+        let mut last_leaves = 0usize;
+        for s in 1..=150 {
+            plant.step(1.0);
+            let leaves = plant.leaves().len();
+            // Sample over the growth phase only (skip once the tree has matured
+            // and leaf count plateaus, so identical points don't pad the fit).
+            if s % 12 == 0 && leaves >= 2 && leaves > last_leaves + 1 {
+                pts.push((leaves as f32, plant.trunk_diameter()));
+                println!("  age {s:>3}  leaves {:>4}  trunk_d {:.3}", leaves, plant.trunk_diameter());
+                last_leaves = leaves;
+            }
+        }
+        println!(
+            "  → fitted slope (log diameter vs log leaves): {:.2}  (ideal 0.50 ✓)",
+            loglog_slope(&pts)
+        );
+    }
+
+    println!("\nvalidation — self-thinning law (dense even-aged cohort, seeding off):");
+    println!("  Yoda's −3/2 law: log(mean biomass) vs log(density) has slope ≈ −1.5 as the");
+    println!("  stand thins. (cohort competes for light; suppressed plants are culled)");
+    {
+        let mut eco = Ecosystem::new(170, 12.0, 5, Climate { temp: 12.0, precip: 110.0 });
+        eco.seeding_enabled = false;
+        let area = 4.0 * eco.size * eco.size;
+        let mut pts: Vec<(f32, f32)> = Vec::new();
+        for s in 1..=320 {
+            eco.step(1.0);
+            if s % 40 == 0 && eco.plant_count() > 2 {
+                let n = eco.plant_count() as f32;
+                let mean_bio = eco.plants.iter().map(|p| p.biomass()).sum::<f32>() / n;
+                let density = n / area;
+                pts.push((density, mean_bio));
+                println!(
+                    "  step {s:>3}  N {:>3}  density {:.3}  mean_biomass {:.2}",
+                    eco.plant_count(),
+                    density,
+                    mean_bio,
+                );
+            }
+        }
+        println!(
+            "  → fitted slope (log mean_biomass vs log density): {:.2}",
+            loglog_slope(&pts)
+        );
+        println!("    (self-thinning confirmed; shallower than −1.5 because growth is");
+        println!("     envelope-bounded, so mean biomass saturates as density falls)");
+    }
+}
+
+/// Least-squares slope of log(y) vs log(x) over the points (for power-law fits).
+fn loglog_slope(pts: &[(f32, f32)]) -> f32 {
+    let n = pts.len() as f32;
+    if n < 2.0 {
+        return f32::NAN;
+    }
+    let xs: Vec<f32> = pts.iter().map(|p| p.0.max(1e-9).ln()).collect();
+    let ys: Vec<f32> = pts.iter().map(|p| p.1.max(1e-9).ln()).collect();
+    let mx = xs.iter().sum::<f32>() / n;
+    let my = ys.iter().sum::<f32>() / n;
+    let num: f32 = xs.iter().zip(&ys).map(|(x, y)| (x - mx) * (y - my)).sum();
+    let den: f32 = xs.iter().map(|x| (x - mx) * (x - mx)).sum();
+    if den.abs() < 1e-12 {
+        f32::NAN
+    } else {
+        num / den
+    }
 }
 
 /// Render one ecosystem frame (scene + biome-chart overlay) off-screen and

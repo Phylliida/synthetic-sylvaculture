@@ -110,6 +110,9 @@ pub struct Ecosystem {
     pub age: f32,
     /// Global shadowing on/off (Sec. 6.2). Off = plants ignore each other's shade.
     pub shadow_enabled: bool,
+    /// Seeding/recruitment on/off. Off = a fixed even-aged cohort (used by the
+    /// self-thinning validation, where new recruits would muddle the law).
+    pub seeding_enabled: bool,
     /// Climate (Sec. 6.4): drives per-species adaptation o (Eq. 11).
     pub climate: Climate,
     /// Population cap (for interactive performance).
@@ -158,6 +161,7 @@ impl Ecosystem {
             size,
             age: 0.0,
             shadow_enabled: true,
+            seeding_enabled: true,
             climate,
             max_plants: 170,
             rng,
@@ -236,7 +240,9 @@ impl Ecosystem {
         }
 
         self.cull_dead();
-        self.seed(dt);
+        if self.seeding_enabled {
+            self.seed(dt);
+        }
     }
 
     /// Remove senesced or fully-suppressed plants, opening gaps (Sec. 4.2).

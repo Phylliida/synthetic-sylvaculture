@@ -385,12 +385,20 @@ impl Plant {
         }
         self.markers = kept;
 
+        // Self-shading for a standalone plant (no external grid): the plant
+        // shades its own buds, so an isolated tree self-thins and clears a bole
+        // too. In the ecosystem qg already encodes self + neighbour shade.
+        let self_g = if qg.is_none() { Some(self.self_shadow()) } else { None };
+
         // (c) set Q (space × light), the growth direction, and record the
         //     current light level (the actual light g, independent of free
         //     space — a metamer's foliage is lit even where no markers remain;
         //     this is what shedding reads).
         for &id in &ids {
-            let g = qg.and_then(|map| map.get(&id).copied()).unwrap_or(1.0);
+            let g = qg
+                .and_then(|map| map.get(&id).copied())
+                .or_else(|| self_g.as_ref().and_then(|map| map.get(&id).copied()))
+                .unwrap_or(1.0);
             let light = stol + (1.0 - stol) * g;
             self.node_mut(id).light_level = light;
             match sum_dir.get(&id) {
@@ -404,6 +412,43 @@ impl Plant {
                 }
             }
         }
+    }
+
+    /// Per-internode self-shadow light for a standalone plant: a downward
+    /// pyramidal-penumbra voxel grid over the plant's own metamer tips
+    /// (Pałubicki §4.1 shadow propagation; g = max(C − s + a, 0)/C, the +a
+    /// cancels a tip's self-shadow). Lower/interior tips sit under more shadow,
+    /// so they get less light → shed and self-thin like a forest tree.
+    fn self_shadow(&self) -> HashMap<ModuleId, f32> {
+        let cell = (self.params.internode_len * 2.0).max(0.5);
+        let inv = 1.0 / cell;
+        // Gentle: a shallow penumbra (small qmax) and a high full-exposure
+        // constant C, so deeply-buried interior tips are thinned but exposed
+        // ones (e.g. all of a narrow column) keep near-full light.
+        let (a, b, c, qmax) = (1.0f32, 2.0f32, 16.0f32, 3i32);
+        let key = |p: Vec3| {
+            ((p.x * inv).floor() as i32, (p.y * inv).floor() as i32, (p.z * inv).floor() as i32)
+        };
+        let ids = self.alive_ids();
+        let mut s: HashMap<(i32, i32, i32), f32> = HashMap::new();
+        for &id in &ids {
+            let (ci, cj, ck) = key(self.node(id).tip());
+            for q in 0..=qmax {
+                let j = cj - q; // shadow propagates downward
+                let ds = a * b.powi(-q);
+                for di in -q..=q {
+                    for dk in -q..=q {
+                        *s.entry((ci + di, j, ck + dk)).or_insert(0.0) += ds;
+                    }
+                }
+            }
+        }
+        let mut out = HashMap::new();
+        for &id in &ids {
+            let sv = s.get(&key(self.node(id).tip())).copied().unwrap_or(0.0);
+            out.insert(id, ((c - sv + a).max(0.0) / c).clamp(0.0, 1.0));
+        }
+        out
     }
 
     /// Light gathered locally at a metamer: its active buds' availability Q
@@ -765,6 +810,23 @@ impl Plant {
             .map(|&id| self.node(id).tip().y.max(self.node(id).base.y))
             .fold(0.0, f32::max)
             - self.origin.y
+    }
+
+    /// Total wood volume (Σ truncated-cone segment volumes) — a biomass proxy
+    /// for the self-thinning validation.
+    pub fn biomass(&self) -> f32 {
+        self.skeleton()
+            .iter()
+            .map(|s| {
+                let l = (s.b - s.a).length();
+                std::f32::consts::PI / 3.0 * (s.ra * s.ra + s.ra * s.rb + s.rb * s.rb) * l
+            })
+            .sum()
+    }
+
+    /// Basal trunk diameter (the thickest segment radius × 2) — for allometry.
+    pub fn trunk_diameter(&self) -> f32 {
+        2.0 * self.skeleton().iter().map(|s| s.ra).fold(0.0, f32::max)
     }
 
     /// `(height, crown_radius, apex_offset)` about the plant's base: crown
