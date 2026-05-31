@@ -1,22 +1,45 @@
-//! Plant architecture and growth simulation (Secs. 5.2, 5.3).
+//! Plant architecture and growth — the self-organizing **metamer model** of
+//! Pałubicki et al. 2009, the foundation Makowski 2019 ("Synthetic
+//! Silviculture") builds its plant scale on.
 //!
-//! A plant is an ordered tree of branch-module instances (the *module
-//! architecture*) with a single root module. Each simulation step:
-//!   1. basipetal light pass:   Q(u) = exp(-collisions), accumulate to root
-//!   2. acropetal vigor pass:   redistribute v̄ with apical control λ (Eq. 2)
-//!   3. development:            growth rate ϒ (Eq. 5), integrate age (Eq. 6)
-//!   4. structural change:      attach new modules at mature terminals, shed
-//!                              modules whose vigor fell below v̄min
+//! A tree is a set of *metamers* (an internode + an axillary lateral bud; the
+//! tip of an axis also carries a terminal bud). Each simulation cycle
+//! (Pałubicki Fig. 3) is:
 //!
-//! Milestone 1 keeps light uniform (Q=1, no collisions yet — that arrives with
-//! orientation optimization) so the visible behavior is driven purely by the
-//! vigor redistribution and the development/geometry equations.
+//!   1. environment — exposure Q at each active bud (global shadow Q_G folded
+//!      with shade tolerance: Q = lerp(s_tol, 1, Q_G));
+//!   2. light pass  — Q flows basipetally, accumulating Q_acc in internodes;
+//!   3. vigor pass  — resource v = α·Q_base flows acropetally, split at each
+//!      branch between the main axis and the lateral by the extended
+//!      Borchert–Honda rule
+//!          vm = v·λ·Qm / (λ·Qm + (1−λ)·Ql),   vl = v·(1−λ)·Ql / (…);
+//!   4. bud fate    — a bud receiving resource v sprouts a shoot of n = ⌊v⌋
+//!      metamers, each of length l = v/n, so **shoot length ∝ vigor** (this is
+//!      what fills out crowns and closes a forest canopy);
+//!   5. shedding    — a branch whose light-per-internode ratio is too low is
+//!      dropped (forms clean boles under shade);
+//!   6. diameters   — pipe model d = √(Σ d_child²), φ at the tips.
+//!
+//! Apical control λ around 0.5 spans the excurrent↔decurrent range (Pałubicki
+//! Fig. 7): λ>0.5 favours the leader (excurrent), λ<0.5 the laterals
+//! (decurrent). There is no fixed module prototype or morphospace — branching
+//! is procedural and emerges from the competition for light.
 
-use crate::prototype::Prototype;
-use glam::{Quat, Vec3};
+use glam::Vec3;
 use std::collections::HashMap;
 
+/// Stable id of an internode (kept named `ModuleId` for the ecosystem API).
 pub type ModuleId = usize;
+
+/// Golden-angle phyllotaxis (≈137.5°): successive lateral buds spiral around
+/// the axis, so a shoot's branches fan out in 3D rather than stacking.
+const GOLDEN_ANGLE: f32 = 2.399_963_2;
+
+/// Maximum metamers a single bud sprouts in one step. The metamer rule is
+/// n = ⌊v⌋ (Pałubicki §4.2); we cap it per step so a bud that funnels a large
+/// resource extends gradually (and competition can redirect it between steps)
+/// rather than extruding one long straight beam in a single cycle.
+pub(crate) const MAX_SHOOT: u32 = 2;
 
 /// A render-ready truncated-cone branch segment in world space.
 #[derive(Clone, Copy, Debug)]
@@ -27,185 +50,149 @@ pub struct Segment {
     pub rb: f32,
 }
 
-/// Per plant-type structural parameters. Names follow the paper / Tab. 4.
+/// Per plant-type parameters of the metamer model.
 #[derive(Clone, Debug)]
 pub struct PlantParams {
-    /// Maximum vigor allocated to the root module (v̄rootmax).
-    pub v_root_max: f32,
-    /// Plant-scale growth rate (g_p), scales every module's growth rate.
-    pub gp: f32,
-    /// Apical control λ (Eq. 2). >0.5 excurrent, ≤0.5 decurrent.
+    /// Apical control λ (extended Borchert–Honda). λ>0.5 biases resource to the
+    /// main axis (excurrent), λ<0.5 to the lateral (decurrent). The expressive
+    /// range sits near 0.5 (Pałubicki Fig. 7).
     pub lambda: f32,
-    /// Determinacy D (morphospace query axis). High D -> monopodial.
+    /// Resource coefficient α: total resource v_base = α·Q_base (Pałubicki §4.2,
+    /// typically ≈2). More α → longer shoots (n = ⌊v⌋) → denser, faster trees.
+    pub alpha: f32,
+    /// Plant-scale growth multiplier on the resource (species vigor knob).
+    pub gp: f32,
+    /// Cap on the total resource v_base. Climate adaptation scales this, so a
+    /// poorly-adapted plant has a smaller resource budget. Also bounds tree size.
+    pub v_root_max: f32,
+    /// World length of a unit (l=1) internode; an internode's length is
+    /// internode_len · (v/n).
+    pub internode_len: f32,
+    /// Lateral branching angle bias: high determinacy → narrower (more upright,
+    /// excurrent) laterals; low → wider (more horizontal, decurrent).
     pub determinacy: f32,
-    /// Shedding / attachment threshold (v̄min): modules below it are shed.
-    pub v_min: f32,
-    /// Normalization for the growth-rate sigmoid (v̄max in Eq. 5). We use
-    /// v_root_max.
-    pub v_max: f32,
-    /// Module physiological age at which it is fully developed (a_mature).
-    pub a_mature: f32,
-    /// Growth-rate floor in [0,1]: a living module develops at no less than this
-    /// fraction of the full rate regardless of vigor (Eq. 5 becomes
-    /// ϒ = gp·(floor + (1−floor)·S)). >0 lets low-vigor laterals fill into real
-    /// branches instead of crawling, so a tall (high-λ) tree grows a crown
-    /// rather than a bare pole. 0 = the literal sigmoid.
-    pub growth_floor: f32,
-    /// Hard cap on modules per plant (safety bound on crown size / geometry).
-    pub max_modules: usize,
-    /// Branch length scaling coefficient (β, Eq. 9).
-    pub beta: f32,
-    /// Maximum branch-segment length (ℓmax, Eq. 9).
-    pub l_max: f32,
-    /// Thickening factor / minimum segment diameter (φ, Eq. 8).
+    /// Pipe-model tip diameter contributed by each leaf (φ, Eq. 8).
     pub phi: f32,
-    /// Tropism temporal decay (g1, Eq. 10).
+    /// Tropism temporal decay (g1): younger metamers in a shoot bend more.
     pub g1: f32,
-    /// Tropism strength/sign (g2, Eq. 10). Negative = gravitropism (droop),
-    /// positive = phototropism. Not tabulated in the paper's Tab. 4; chosen
-    /// here pending the Palubicki 2009 details.
+    /// Lateral gravitropism (g2): negative droops branches down, positive lifts
+    /// them up. Shapes the spread of the crown (Pałubicki Fig. 12).
     pub g2: f32,
-    /// Maximum plant age before senescence begins (p_max).
+    /// Leader up-righting strength: how strongly terminal (axis-continuing)
+    /// shoots steer back toward vertical, keeping a straight bole.
+    pub tropism_up: f32,
+    /// Senescence onset age (p_max): past it the resource ramps to zero.
     pub p_max: f32,
-    /// Shade tolerance s_tol ∈ [0,1] (Sec. 6.2): the global-shadow light floor.
-    /// Q_eff = lerp(s_tol, 1, Q·Q_G), so a tolerant plant (high s_tol) still
-    /// receives light under shade. 0 = no global shadowing effect.
+    /// Shade tolerance s_tol ∈ [0,1]: the global-shadow light floor,
+    /// Q = lerp(s_tol, 1, Q_G).
     pub shade_tolerance: f32,
-
-    // --- Sec. 5.2.3 module orientation optimization + collision light ---
-    /// Use collision-based light Q = exp(−scale·f_collisions) instead of Q=1.
-    pub collision_light: bool,
-    /// Scale on f_collisions inside the light exponential.
-    pub light_scale: f32,
-    /// Run gradient-descent orientation optimization for new modules.
-    pub optimize_orientation: bool,
-    /// Collision-avoidance weight ω1 in f_distribution (Eq. 3).
-    pub omega1: f32,
-    /// Tropism weight ω2 in f_distribution (Eq. 3 / Tab. 4).
-    pub omega2: f32,
-    /// Gravitropic set-point angle (rad) from vertical used by f_tropism (Eq. 4).
-    pub tropism_set_angle: f32,
-    /// Per-step rotation increment α used by the optimizer's candidate set
-    /// P = {±α about local x, ±α about local z} (App. A.1).
-    pub opt_angle: f32,
-    /// Number of gradient-descent steps per optimization (~3 per the paper).
-    pub opt_iters: u32,
-    /// Under-relaxation factor in [0,1]: each step a module rotates only this
-    /// fraction of the way toward its optimized orientation. <1 damps the
-    /// simultaneous-update oscillation ("flicker") and converges to a fixed
-    /// point. 1.0 = undamped (greedy, oscillates).
-    pub opt_damping: f32,
-    /// Hard cap (radians) on how far a module may rotate in a single step.
-    pub opt_max_step: f32,
-    /// Minimum current collision volume for a module to bother reorienting.
-    /// Modules that aren't overlapping anything are left alone, so settled
-    /// structure stops moving (removes residual flicker).
-    pub opt_collision_eps: f32,
-    /// Freeze settled modules: skip orientation optimization for modules that
-    /// are mature or not currently colliding. This is what stops the crown
-    /// flickering; disable only to study the old perpetual-relaxation behavior.
-    pub opt_freeze_settled: bool,
+    /// Shedding threshold: a lateral branch whose light-per-internode ratio
+    /// falls below this is shed (Pałubicki §4.4). Low = gentle pruning.
+    pub shed_ratio: f32,
+    /// Leaf lifespan (steps): a metamer gathers light only while young (or
+    /// while it still bears its terminal bud). Older interior wood is bare and
+    /// contributes no light, so resource tracks the canopy *surface*, not the
+    /// whole trunk — this is what stops the leader from monopolising vigor and
+    /// running away into a bare whip.
+    pub leaf_lifespan: f32,
+    /// Hard cap on internode count (bounds geometry / performance).
+    pub max_modules: usize,
 }
 
 impl Default for PlantParams {
     fn default() -> Self {
         Self {
-            v_root_max: 100.0,
-            gp: 0.35,
-            lambda: 0.72,
-            determinacy: 0.8,
-            v_min: 1.0,
-            v_max: 100.0,
-            a_mature: 1.0,
-            growth_floor: 0.0,
-            max_modules: usize::MAX,
-            beta: 1.0,
-            l_max: 1.2,
-            phi: 0.02,
-            g1: 1.0,
-            g2: -0.35,
-            p_max: 1.0e9, // effectively no senescence in milestone 1
+            lambda: 0.52,
+            alpha: 2.0,
+            gp: 1.0,
+            v_root_max: 120.0,
+            internode_len: 0.55,
+            determinacy: 0.5,
+            phi: 0.04,
+            g1: 1.6,
+            g2: -0.18,
+            tropism_up: 0.30,
+            p_max: 1.0e9,
             shade_tolerance: 0.0,
-            // Sec. 5.2.3 features default OFF so the base-model tests stay
-            // exact; the viewer and the orientation tests enable them.
-            collision_light: false,
-            light_scale: 0.5,
-            optimize_orientation: false,
-            omega1: 1.0,
-            omega2: 0.35,
-            tropism_set_angle: 0.0,
-            opt_angle: 0.4,
-            opt_iters: 6,
-            opt_damping: 0.25,
-            opt_max_step: 0.2,
-            opt_collision_eps: 0.05,
-            opt_freeze_settled: true,
+            shed_ratio: 0.0,
+            leaf_lifespan: 4.0,
+            max_modules: 4000,
         }
     }
 }
 
-/// One instantiated branch module.
+/// One metamer: the internode from `base` along `dir` for `length`, plus the
+/// buds it carries. An axis is a chain of metamers of equal `order`.
 #[derive(Clone, Debug)]
-pub struct Module {
-    pub proto: usize,
-    pub parent: Option<ModuleId>,
-    /// Absolute orientation of the module frame in world space.
-    pub orientation: Quat,
-    /// World position of this module's root node (the attachment point).
-    pub base_pos: Vec3,
-    /// Children, paired with the terminal node index (in *this* module's
-    /// prototype) they attach to. `children[*].0 == terminals[0]` is apical.
-    pub children: Vec<(usize, ModuleId)>,
-    /// Physiological age a_u (Eq. 6), in [0, a_mature].
-    pub age: f32,
-    /// Plant-scale vigor v̄(u) (Eq. 2).
-    pub vigor: f32,
-    /// Local light exposure Q(u) = exp(-collisions). Uniform (=1) for now.
-    pub q_local: f32,
-    /// Accumulated light flux through this module's subtree (basipetal pass).
-    pub q_acc: f32,
+struct Internode {
+    parent: Option<ModuleId>,
+    children: Vec<ModuleId>,
+    base: Vec3,
+    dir: Vec3,
+    length: f32,
+    /// Axis order: 0 is the trunk; a lateral starts an axis of order+1.
+    order: u32,
+    /// Index of this metamer within its shoot (drives tropism decay & phyllo).
+    rank: u32,
+    age: f32,
+    /// This metamer's tip carries the terminal bud (continues the axis).
+    terminal_bud: bool,
+    /// This metamer carries an unspouted axillary (lateral) bud.
+    lateral_bud: bool,
+    // --- recomputed each cycle ---
+    /// Exposure Q at this metamer's buds.
+    q_bud: f32,
+    /// Basipetally accumulated light through this internode's subtree.
+    q_acc: f32,
+    /// Resource v reaching this internode (acropetal).
+    vigor: f32,
+    /// Resource routed to the terminal / lateral bud this cycle.
+    term_resource: f32,
+    lat_resource: f32,
+    /// Pipe-model diameter.
+    diam: f32,
 }
 
-impl Module {
-    fn new(proto: usize, parent: Option<ModuleId>, orientation: Quat, base_pos: Vec3) -> Self {
-        Self {
-            proto,
-            parent,
-            orientation,
-            base_pos,
-            children: Vec::new(),
-            age: 0.0,
-            vigor: 0.0,
-            q_local: 1.0,
-            q_acc: 1.0,
-        }
-    }
-
-    pub fn is_mature(&self, p: &PlantParams) -> bool {
-        self.age >= p.a_mature
+impl Internode {
+    fn tip(&self) -> Vec3 {
+        self.base + self.dir * self.length
     }
 }
 
 pub struct Plant {
-    pub protos: Vec<Prototype>,
-    /// Module storage. `None` slots are shed modules (indices stay stable).
-    pub modules: Vec<Option<Module>>,
-    pub root: ModuleId,
+    /// Internode storage; `None` slots are shed metamers (ids stay stable).
+    nodes: Vec<Option<Internode>>,
+    root: ModuleId,
     pub params: PlantParams,
-    /// Plant age p_t (in simulation steps / "years").
+    /// Plant age p_t (simulation steps / "years").
     pub age: f32,
     pub origin: Vec3,
 }
 
 impl Plant {
-    pub fn new(protos: Vec<Prototype>, params: PlantParams, origin: Vec3) -> Self {
-        // Root module grows straight up; its prototype is chosen from the
-        // morphospace at full vigor (D′ ≈ D).
-        let root_proto = nearest_proto(&protos, params.lambda, params.determinacy);
-        let root_mod = Module::new(root_proto, None, Quat::IDENTITY, origin);
+    pub fn new(params: PlantParams, origin: Vec3) -> Self {
+        // Seedling: one upright internode of the trunk axis, carrying both a
+        // terminal bud (to extend the trunk) and a lateral bud.
+        let seed = Internode {
+            parent: None,
+            children: Vec::new(),
+            base: origin,
+            dir: Vec3::Y,
+            length: params.internode_len,
+            order: 0,
+            rank: 0,
+            age: 0.0,
+            terminal_bud: true,
+            lateral_bud: true,
+            q_bud: 1.0,
+            q_acc: 1.0,
+            vigor: 0.0,
+            term_resource: 0.0,
+            lat_resource: 0.0,
+            diam: params.phi,
+        };
         Plant {
-            protos,
-            modules: vec![Some(root_mod)],
+            nodes: vec![Some(seed)],
             root: 0,
             params,
             age: 0.0,
@@ -213,231 +200,509 @@ impl Plant {
         }
     }
 
-    pub fn module(&self, id: ModuleId) -> &Module {
-        self.modules[id].as_ref().unwrap()
+    fn node(&self, id: ModuleId) -> &Internode {
+        self.nodes[id].as_ref().unwrap()
     }
-    fn module_mut(&mut self, id: ModuleId) -> &mut Module {
-        self.modules[id].as_mut().unwrap()
+    fn node_mut(&mut self, id: ModuleId) -> &mut Internode {
+        self.nodes[id].as_mut().unwrap()
     }
-    pub fn alive_ids(&self) -> Vec<ModuleId> {
-        (0..self.modules.len())
-            .filter(|&i| self.modules[i].is_some())
-            .collect()
+    fn alive_ids(&self) -> Vec<ModuleId> {
+        (0..self.nodes.len()).filter(|&i| self.nodes[i].is_some()).collect()
     }
     pub fn module_count(&self) -> usize {
-        self.modules.iter().filter(|m| m.is_some()).count()
+        self.nodes.iter().filter(|n| n.is_some()).count()
     }
 
-    /// Advance the simulation by one step of size `dt` (standalone plant).
+    /// Advance the simulation one step (standalone plant, uniform light).
     pub fn step(&mut self, dt: f32) {
         self.step_impl(dt, None);
     }
 
-    /// Advance with externally-supplied global shadow light Q_G per module
-    /// (driven by the ecosystem's shadow grid, Sec. 6.2).
+    /// Advance with externally-supplied global-shadow light Q_G per internode
+    /// (the ecosystem's shadow grid, Sec. 6.2).
     pub fn step_shaded(&mut self, dt: f32, qg: &HashMap<ModuleId, f32>) {
         self.step_impl(dt, Some(qg));
     }
 
     fn step_impl(&mut self, dt: f32, qg: Option<&HashMap<ModuleId, f32>>) {
         self.age += dt;
-        // Collision-based light reads the current geometry's bounding spheres.
-        let spheres = if self.params.collision_light {
-            self.module_spheres()
-        } else {
-            HashMap::new()
-        };
-        self.light_pass(&spheres, qg);
-        self.vigor_pass();
-        self.develop(dt);
-        self.shed();
-        if self.params.optimize_orientation {
-            self.optimize_orientations();
-        }
-    }
-
-    // --- 1. basipetal light accumulation ------------------------------------
-    // Local light Q(u) = exp(−scale·f_collisions(u)) (Eq. 1, =1 when disabled),
-    // folded with the global shadow Q_G as Q_eff = lerp(s_tol, 1, Q·Q_G)
-    // (Sec. 6.2), then Q_acc(u) = Q_eff(u) + Σ Q_acc(child) tip-to-base.
-    fn light_pass(&mut self, spheres: &HashMap<ModuleId, BSphere>, qg: Option<&HashMap<ModuleId, f32>>) {
-        let stol = self.params.shade_tolerance;
-        let scale = self.params.light_scale;
-        let collision = self.params.collision_light;
         for id in self.alive_ids() {
-            let q_col = if collision {
-                (-scale * self.f_collisions(id, spheres)).exp()
-            } else {
-                1.0
-            };
-            let q_g = qg.and_then(|m| m.get(&id).copied()).unwrap_or(1.0);
-            // lerp(stol, 1, q_col*q_g)
-            self.module_mut(id).q_local = stol + (1.0 - stol) * (q_col * q_g);
+            self.node_mut(id).age += dt;
         }
-        // Basipetal accumulation.
-        let order = self.post_order(self.root);
-        for &id in &order {
-            let m = self.module(id);
-            let mut acc = m.q_local;
-            let kids: Vec<ModuleId> = m.children.iter().map(|(_, c)| *c).collect();
-            for c in kids {
-                acc += self.module(c).q_acc;
-            }
-            self.module_mut(id).q_acc = acc;
-        }
+        self.environment(qg);
+        self.light_pass();
+        self.vigor_pass();
+        self.grow();
+        self.shed();
+        self.recompute_diameters();
     }
 
-    /// f_collisions(u): summed bounding-sphere intersection volume with all
-    /// other modules, excluding structurally adjacent ones (parent / children),
-    /// whose overlap is unavoidable (Eq. 1).
-    fn f_collisions(&self, id: ModuleId, spheres: &HashMap<ModuleId, BSphere>) -> f32 {
-        let su = match spheres.get(&id) {
-            Some(s) => *s,
-            None => return 0.0,
+    // --- 1. environment: exposure Q at each metamer's buds -------------------
+    // Self-organization (Pałubicki §4.1): a bud's exposure falls where space is
+    // already occupied. We use shadow propagation — each metamer casts a
+    // downward pyramidal penumbra into a voxel grid; a bud's light is read back
+    // from the grid. This is what bounds each axis and fills the crown evenly
+    // (without it, branch-length-∝-vigor runs away into straight beams). In the
+    // ecosystem the shared grid (qg) already encodes self + neighbour shade; a
+    // standalone plant shades itself here.
+    fn environment(&mut self, qg: Option<&HashMap<ModuleId, f32>>) {
+        let stol = self.params.shade_tolerance;
+        let local = if qg.is_none() {
+            Some(self.self_shadow())
+        } else {
+            None
         };
-        let parent = self.module(id).parent;
-        let kids: Vec<ModuleId> = self.module(id).children.iter().map(|(_, c)| *c).collect();
-        let mut sum = 0.0;
-        for (&w, &sw) in spheres {
-            if w == id || Some(w) == parent || kids.contains(&w) {
-                continue;
-            }
-            sum += sphere_intersection_volume(su, sw);
+        for id in self.alive_ids() {
+            let g = qg
+                .and_then(|m| m.get(&id).copied())
+                .or_else(|| local.as_ref().and_then(|m| m.get(&id).copied()))
+                .unwrap_or(1.0);
+            self.node_mut(id).q_bud = stol + (1.0 - stol) * g;
         }
-        sum
     }
 
-    // --- 2. acropetal vigor redistribution (Eq. 2) --------------------------
+    /// Per-internode self-shadow light from a downward pyramidal-penumbra voxel
+    /// grid over the plant's own metamer tips (Pałubicki §4.1 / Eq. Q = max(C −
+    /// s + a, 0)/C; the +a cancels a bud's self-shadow).
+    fn self_shadow(&self) -> HashMap<ModuleId, f32> {
+        let cell = (self.params.internode_len * 2.0).max(0.5);
+        let inv = 1.0 / cell;
+        let (a, b, c, qmax) = (1.0f32, 2.0f32, 7.0f32, 6i32);
+        let key = |p: Vec3| {
+            (
+                (p.x * inv).floor() as i32,
+                (p.y * inv).floor() as i32,
+                (p.z * inv).floor() as i32,
+            )
+        };
+        let mut s: HashMap<(i32, i32, i32), f32> = HashMap::new();
+        let ids = self.alive_ids();
+        for &id in &ids {
+            let (ci, cj, ck) = key(self.node(id).tip());
+            for q in 0..=qmax {
+                let j = cj - q; // shadow propagates downward
+                let ds = a * b.powi(-q);
+                for di in -q..=q {
+                    for dk in -q..=q {
+                        *s.entry((ci + di, j, ck + dk)).or_insert(0.0) += ds;
+                    }
+                }
+            }
+        }
+        let mut out = HashMap::new();
+        for &id in &ids {
+            let sv = s.get(&key(self.node(id).tip())).copied().unwrap_or(0.0);
+            out.insert(id, ((c - sv + a).max(0.0) / c).clamp(0.0, 1.0));
+        }
+        out
+    }
+
+    /// Light gathered locally at a metamer: its buds' exposure, but only while
+    /// the metamer is leafy (young, or still a live tip). Bare interior wood
+    /// gathers nothing, so a tree's resource tracks its canopy surface.
+    fn q_self(&self, id: ModuleId) -> f32 {
+        let n = self.node(id);
+        let leafy = n.age < self.params.leaf_lifespan || n.terminal_bud;
+        if !leafy {
+            return 0.0;
+        }
+        ((n.terminal_bud as u32 + n.lateral_bud as u32) as f32) * n.q_bud
+    }
+
+    // --- 2. basipetal light accumulation -------------------------------------
+    //   Q_acc(u) = Q_self(u) + Σ Q_acc(child), accumulated tip-to-base.
+    fn light_pass(&mut self) {
+        for &id in &self.post_order(self.root) {
+            let mut acc = self.q_self(id);
+            let kids: Vec<ModuleId> = self.node(id).children.clone();
+            for c in kids {
+                acc += self.node(c).q_acc;
+            }
+            self.node_mut(id).q_acc = acc;
+        }
+    }
+
+    // --- 3. acropetal Borchert–Honda resource distribution -------------------
     fn vigor_pass(&mut self) {
         let p = self.params.clone();
-        // Senescence: once past p_max, linearly ramp the root allotment to 0.
         let senescence = if self.age <= p.p_max {
             1.0
         } else {
             (1.0 - (self.age - p.p_max) / p.p_max.max(1.0)).clamp(0.0, 1.0)
         };
-        // Total resource scales with the light the plant actually gathers
-        // (Borchert-Honda v_base = α·Q_base, capped at v_root_max). avg_q is the
-        // mean per-module effective light ∈ [s_tol, 1]; a shaded plant gathers
-        // less and is suppressed — the mechanism behind understory stunting and
-        // succession. With no shading (avg_q = 1) this is exactly v_root_max.
-        let avg_q = self.module(self.root).q_acc / self.module_count().max(1) as f32;
-        let v_root = p.v_root_max * senescence * avg_q.clamp(0.0, 1.0);
+        let q_base = self.node(self.root).q_acc;
+        let v_base = (p.gp * p.alpha * q_base).min(p.v_root_max) * senescence;
 
-        // Pre-order: parent's vigor is known before its children's.
-        let order = self.pre_order(self.root);
-        for &id in &order {
-            if id == self.root {
-                self.module_mut(id).vigor = v_root;
+        // Zero all routing state first, then seed the root. A node whose whole
+        // subtree is dark (denom = 0) routes nothing, so its children must read
+        // 0 here rather than a stale value from a previous step (else resource
+        // leaks and conservation breaks).
+        for id in self.alive_ids() {
+            let n = self.node_mut(id);
+            n.vigor = 0.0;
+            n.term_resource = 0.0;
+            n.lat_resource = 0.0;
+        }
+        self.node_mut(self.root).vigor = v_base;
+
+        for &id in &self.pre_order(self.root) {
+            let v = self.node(id).vigor;
+            let order = self.node(id).order;
+
+            // Each internode has at most one "main" outgoing branch (the axis
+            // continuation: a same-order child, else the terminal bud) and one
+            // "lateral" (a higher-order child, else the lateral bud).
+            let mut main_child = None;
+            let mut lat_child = None;
+            for &c in &self.node(id).children {
+                if self.node(c).order == order {
+                    main_child = Some(c);
+                } else {
+                    lat_child = Some(c);
+                }
             }
-            let v_u = self.module(id).vigor;
-            let children: Vec<(usize, ModuleId)> = self.module(id).children.clone();
-            if children.is_empty() {
+            let q_bud = self.node(id).q_bud;
+            let has_term = self.node(id).terminal_bud;
+            let has_lat = self.node(id).lateral_bud;
+
+            let main_q = main_child
+                .map(|c| self.node(c).q_acc)
+                .or(if has_term { Some(q_bud) } else { None });
+            let lat_q = lat_child
+                .map(|c| self.node(c).q_acc)
+                .or(if has_lat { Some(q_bud) } else { None });
+
+            let wm = main_q.map(|q| p.lambda * q).unwrap_or(0.0);
+            let wl = lat_q.map(|q| (1.0 - p.lambda) * q).unwrap_or(0.0);
+            let denom = wm + wl;
+            if denom <= 1e-9 {
                 continue;
             }
-            // Borchert-Honda split generalized to >2 children:
-            //   weight = λ for the apical child, (1-λ) for each lateral,
-            //   share_i = v_u * w_i Q_i / Σ_j w_j Q_j.
-            // The apical child is the one attached to terminals[0].
-            let apical_terminal = self.protos[self.module(id).proto].terminals[0];
-            let mut denom = 0.0f32;
-            let mut weights: Vec<f32> = Vec::with_capacity(children.len());
-            for (term, cid) in &children {
-                let w = if *term == apical_terminal {
-                    p.lambda
-                } else {
-                    1.0 - p.lambda
-                };
-                let q = self.module(*cid).q_acc;
-                let wq = w * q;
-                weights.push(wq);
-                denom += wq;
+            let main_share = v * wm / denom;
+            let lat_share = v * wl / denom;
+
+            match main_child {
+                Some(c) => self.node_mut(c).vigor = main_share,
+                None if has_term => self.node_mut(id).term_resource = main_share,
+                _ => {}
             }
-            for (i, (_term, cid)) in children.iter().enumerate() {
-                let share = if denom > 1e-9 {
-                    v_u * weights[i] / denom
-                } else {
-                    v_u / children.len() as f32
-                };
-                self.module_mut(*cid).vigor = share;
+            match lat_child {
+                Some(c) => self.node_mut(c).vigor = lat_share,
+                None if has_lat => self.node_mut(id).lat_resource = lat_share,
+                _ => {}
             }
         }
     }
 
-    // --- 3. development: grow ages, attach new modules ----------------------
-    fn develop(&mut self, dt: f32) {
+    // --- 4. bud fate: sprout shoots of ⌊v⌋ metamers --------------------------
+    fn grow(&mut self) {
         let p = self.params.clone();
-        let ids = self.alive_ids();
-
-        // Integrate physiological age for every module (Eqs. 5, 6).
-        for &id in &ids {
-            let v = self.module(id).vigor;
-            let x = ((v - p.v_min) / (p.v_max - p.v_min)).clamp(0.0, 1.0);
-            let s = growth_sigmoid(x); // smoothstep S(x) (Eq. 5)
-            // Growth-rate floor lets low-vigor laterals develop (fuller crowns).
-            let growth_rate = p.gp * (p.growth_floor + (1.0 - p.growth_floor) * s);
-            let m = self.module_mut(id);
-            m.age = (m.age + growth_rate * dt).min(p.a_mature);
-        }
-
-        // Attach new modules at mature, unoccupied terminals (until the cap).
-        for &id in &ids {
+        for id in self.alive_ids() {
             if self.module_count() >= p.max_modules {
                 break;
             }
-            if !self.module(id).is_mature(&p) {
-                continue;
+            // Terminal bud → continue the axis (same order).
+            let n = self.node(id);
+            if n.terminal_bud {
+                let v = n.term_resource;
+                if v >= 1.0 {
+                    let order = n.order;
+                    let dir = n.dir;
+                    self.node_mut(id).terminal_bud = false;
+                    self.sprout(id, dir, order, v, true);
+                }
             }
-            let proto_idx = self.module(id).proto;
-            let v_u = self.module(id).vigor;
-            let terminals = self.protos[proto_idx].terminals.clone();
-            let apical = terminals[0];
-            let occupied: Vec<usize> =
-                self.module(id).children.iter().map(|(t, _)| *t).collect();
-
-            for &term in &terminals {
-                if occupied.contains(&term) {
-                    continue;
+            if self.module_count() >= p.max_modules {
+                break;
+            }
+            // Lateral bud → start a new axis (order+1) at a branching angle.
+            let n = self.node(id);
+            if n.lateral_bud {
+                let v = n.lat_resource;
+                if v >= 1.0 {
+                    let order = n.order + 1;
+                    let dir = self.lateral_direction(id);
+                    self.node_mut(id).lateral_bud = false;
+                    self.sprout(id, dir, order, v, false);
                 }
-                // Estimate the vigor that would flow to this terminal.
-                let w = if term == apical {
-                    p.lambda
-                } else {
-                    1.0 - p.lambda
-                };
-                let term_vigor = v_u * w;
-                if term_vigor <= p.v_min {
-                    continue;
-                }
-                self.attach_child(id, term, term_vigor);
             }
         }
     }
 
-    /// Create and attach a new module at terminal `term` of module `parent_id`.
-    /// `init_vigor` seeds the new module's vigor so it survives the shedding
-    /// pass in the step it is born (the next vigor pass recomputes it exactly).
-    /// The orientation is stored *relative to the parent*: the child's local
-    /// axis (+Y) maps to the terminal's local direction. The per-step
-    /// `optimize_orientations` relaxation then refines it.
-    fn attach_child(&mut self, parent_id: ModuleId, term: usize, init_vigor: f32) {
-        let parent = self.module(parent_id);
-        let parent_proto = &self.protos[parent.proto];
-        let term_local_dir = parent_proto.seg_dir_local(term);
-
-        // Select prototype via morphospace (Voronoi-nearest to (λ, D')).
-        let d_prime = parent.vigor * self.params.determinacy / self.params.v_root_max;
-        let proto_idx = self.select_prototype(self.params.lambda, d_prime);
-
-        let orientation = Quat::from_rotation_arc(Vec3::Y, term_local_dir);
-        let mut child = Module::new(proto_idx, Some(parent_id), orientation, Vec3::ZERO);
-        child.vigor = init_vigor;
-        let new_id = self.alloc(child);
-        self.module_mut(parent_id).children.push((term, new_id));
+    /// Append a shoot of n = ⌊v⌋ metamers (each of length internode_len·v/n)
+    /// from the tip of `parent`, in `start_dir`, bending by tropism each step.
+    fn sprout(&mut self, parent: ModuleId, start_dir: Vec3, order: u32, v: f32, leader: bool) {
+        let p = self.params.clone();
+        // n = ⌊v⌋ metamers of length l = v/⌊v⌋ (Pałubicki §4.2), capped per step
+        // at MAX_SHOOT (see the const).
+        let want = v.floor().max(1.0);
+        let n = (want as u32).min(MAX_SHOOT);
+        let l = (v / want).clamp(1.0, 1.7); // unit-ish internode length
+        let mut base = self.node(parent).tip();
+        let mut dir = start_dir.normalize_or_zero();
+        if dir.length_squared() < 1e-9 {
+            dir = Vec3::Y;
+        }
+        let mut prev = parent;
+        let parent_phyllo = (self.node(parent).rank as f32) * GOLDEN_ANGLE;
+        for k in 0..n {
+            if self.module_count() >= p.max_modules {
+                break;
+            }
+            // Tropism: leaders right toward vertical; laterals droop/lift by g2.
+            let decay = p.g1 / (k as f32 + p.g1);
+            let pull = if leader { p.tropism_up } else { p.g2 };
+            dir = (dir + Vec3::Y * (pull * decay)).normalize_or_zero();
+            if dir.length_squared() < 1e-9 {
+                dir = Vec3::Y;
+            }
+            let node = Internode {
+                parent: Some(prev),
+                children: Vec::new(),
+                base,
+                dir,
+                length: p.internode_len * l,
+                order,
+                rank: k,
+                age: 0.0,
+                terminal_bud: k == n - 1,
+                lateral_bud: true,
+                q_bud: 1.0,
+                q_acc: 1.0,
+                vigor: 0.0,
+                term_resource: 0.0,
+                lat_resource: 0.0,
+                diam: p.phi,
+            };
+            base = node.tip();
+            let _ = parent_phyllo;
+            let new_id = self.alloc(node);
+            self.node_mut(prev).children.push(new_id);
+            prev = new_id;
+        }
     }
 
-    /// Intersection-volume ratio (Fig. 15a validation metric): summed pairwise
-    /// non-adjacent intersection volume divided by total module sphere volume.
+    /// Direction of a metamer's lateral bud: the parent axis tilted by the
+    /// branching angle (from determinacy) around the phyllotactic azimuth.
+    fn lateral_direction(&self, id: ModuleId) -> Vec3 {
+        let n = self.node(id);
+        let d = n.dir.normalize_or_zero();
+        // High determinacy → narrow angle (upright, excurrent); low → wide.
+        let angle = (30.0 + (1.0 - self.params.determinacy) * 50.0).to_radians();
+        let azimuth = (n.rank as f32) * GOLDEN_ANGLE;
+        let (u, v) = d.any_orthonormal_pair();
+        let radial = (u * azimuth.cos() + v * azimuth.sin()).normalize_or_zero();
+        (d * angle.cos() + radial * angle.sin()).normalize_or_zero()
+    }
+
+    // --- 5. shedding: drop starved lateral branches --------------------------
+    fn shed(&mut self) {
+        let p = self.params.clone();
+        if p.shed_ratio <= 0.0 {
+            return;
+        }
+        // subtree internode counts (post-order).
+        let order = self.post_order(self.root);
+        let mut size: HashMap<ModuleId, u32> = HashMap::new();
+        for &id in &order {
+            let mut s = 1u32;
+            for &c in &self.node(id).children {
+                s += size.get(&c).copied().unwrap_or(0);
+            }
+            size.insert(id, s);
+        }
+        // A lateral-axis base is an internode whose parent has a lower order.
+        let mut to_shed: Vec<ModuleId> = Vec::new();
+        for &id in &order {
+            let n = self.node(id);
+            if n.order == 0 || n.age < 6.0 {
+                continue;
+            }
+            let is_axis_base = n.parent.map(|pp| self.node(pp).order < n.order).unwrap_or(false);
+            if !is_axis_base {
+                continue;
+            }
+            let s = size[&id] as f32;
+            if n.q_acc / s < p.shed_ratio {
+                to_shed.push(id);
+            }
+        }
+        for id in to_shed {
+            if self.nodes[id].is_some() {
+                self.remove_subtree(id);
+            }
+        }
+    }
+
+    fn remove_subtree(&mut self, id: ModuleId) {
+        if let Some(parent) = self.node(id).parent {
+            if let Some(pm) = self.nodes[parent].as_mut() {
+                pm.children.retain(|c| *c != id);
+            }
+        }
+        let mut stack = vec![id];
+        let mut dead = Vec::new();
+        while let Some(cur) = stack.pop() {
+            if let Some(m) = self.nodes[cur].as_ref() {
+                for &c in &m.children {
+                    stack.push(c);
+                }
+                dead.push(cur);
+            }
+        }
+        for d in dead {
+            self.nodes[d] = None;
+        }
+    }
+
+    // --- 6. pipe-model diameters ---------------------------------------------
+    fn recompute_diameters(&mut self) {
+        let phi = self.params.phi;
+        for &id in &self.post_order(self.root) {
+            let kids: Vec<ModuleId> = self.node(id).children.clone();
+            let d = if kids.is_empty() {
+                phi
+            } else {
+                kids.iter().map(|&c| self.node(c).diam.powi(2)).sum::<f32>().sqrt().max(phi)
+            };
+            self.node_mut(id).diam = d;
+        }
+    }
+
+    // --- storage / traversal helpers -----------------------------------------
+    fn alloc(&mut self, n: Internode) -> ModuleId {
+        if let Some(slot) = self.nodes.iter().position(|s| s.is_none()) {
+            self.nodes[slot] = Some(n);
+            slot
+        } else {
+            self.nodes.push(Some(n));
+            self.nodes.len() - 1
+        }
+    }
+
+    fn pre_order(&self, root: ModuleId) -> Vec<ModuleId> {
+        let mut out = Vec::new();
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            out.push(id);
+            for &c in &self.node(id).children {
+                stack.push(c);
+            }
+        }
+        out
+    }
+
+    fn post_order(&self, root: ModuleId) -> Vec<ModuleId> {
+        let mut pre = self.pre_order(root);
+        pre.reverse();
+        pre
+    }
+
+    // --- geometry / queries (public API consumed by mesh, ecosystem, main) ---
+
+    /// Render skeleton: one truncated cone per internode, tapering from its own
+    /// (pipe-model) diameter at the base toward its children's at the tip.
+    pub fn skeleton(&self) -> Vec<Segment> {
+        let mut segs = Vec::new();
+        for id in self.alive_ids() {
+            let n = self.node(id);
+            if n.length < 1e-5 {
+                continue;
+            }
+            let kids = &n.children;
+            let tip_d = if kids.is_empty() {
+                self.params.phi
+            } else {
+                kids.iter().map(|&c| self.node(c).diam).fold(0.0, f32::max)
+            };
+            segs.push(Segment {
+                a: n.base,
+                b: n.tip(),
+                ra: n.diam * 0.5,
+                rb: tip_d * 0.5,
+            });
+        }
+        segs
+    }
+
+    /// Leaf attachment points (world position, outward direction): every thin
+    /// twig (diameter near φ) that has extended. Foliage clusters render here.
+    pub fn leaves(&self) -> Vec<(Vec3, Vec3)> {
+        let twig = self.params.phi * 2.5;
+        let mut out = Vec::new();
+        for id in self.alive_ids() {
+            let n = self.node(id);
+            if n.diam <= twig && n.length > 0.1 {
+                out.push((n.tip(), n.dir));
+            }
+        }
+        out
+    }
+
+    /// Highest point reached above the base.
+    pub fn height(&self) -> f32 {
+        self.alive_ids()
+            .iter()
+            .map(|&id| self.node(id).tip().y.max(self.node(id).base.y))
+            .fold(0.0, f32::max)
+            - self.origin.y
+    }
+
+    /// `(height, crown_radius, apex_offset)` about the plant's base: crown
+    /// radius is the max horizontal reach; apex_offset is the highest node's
+    /// horizontal distance from the trunk axis (how much the leader leans/arcs).
+    pub fn shape(&self) -> (f32, f32, f32) {
+        let base = self.origin;
+        let mut height = 0.0f32;
+        let mut crown_radius = 0.0f32;
+        let mut best_y = f32::MIN;
+        let mut apex_offset = 0.0f32;
+        for id in self.alive_ids() {
+            for pnt in [self.node(id).base, self.node(id).tip()] {
+                let dx = pnt.x - base.x;
+                let dz = pnt.z - base.z;
+                let horiz = (dx * dx + dz * dz).sqrt();
+                height = height.max(pnt.y - base.y);
+                crown_radius = crown_radius.max(horiz);
+                if pnt.y > best_y {
+                    best_y = pnt.y;
+                    apex_offset = horiz;
+                }
+            }
+        }
+        (height, crown_radius, apex_offset)
+    }
+
+    /// World-space centre of each internode (for shadow-grid deposition and the
+    /// reciprocal Q_G lookup). Keyed by internode id.
+    pub fn module_centres(&self) -> Vec<(ModuleId, Vec3)> {
+        self.alive_ids()
+            .into_iter()
+            .map(|id| {
+                let n = self.node(id);
+                (id, (n.base + n.tip()) * 0.5)
+            })
+            .collect()
+    }
+
+    /// Per-internode bounding spheres (for the intersection diagnostic).
+    pub fn module_spheres(&self) -> HashMap<ModuleId, BSphere> {
+        let mut out = HashMap::new();
+        for id in self.alive_ids() {
+            let n = self.node(id);
+            out.insert(
+                id,
+                BSphere {
+                    centre: (n.base + n.tip()) * 0.5,
+                    radius: (n.length * 0.5).max(0.05) + 0.05,
+                },
+            );
+        }
+        out
+    }
+
+    /// Summed non-adjacent internode intersection volume / total sphere volume
+    /// (a self-overlap diagnostic).
     pub fn intersection_ratio(&self) -> f32 {
         let spheres = self.module_spheres();
         let ids: Vec<ModuleId> = spheres.keys().copied().collect();
@@ -445,7 +710,7 @@ impl Plant {
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
                 let (a, b) = (ids[i], ids[j]);
-                let adj = self.module(a).parent == Some(b) || self.module(b).parent == Some(a);
+                let adj = self.node(a).parent == Some(b) || self.node(b).parent == Some(a);
                 if adj {
                     continue;
                 }
@@ -462,463 +727,13 @@ impl Plant {
             0.0
         }
     }
-
-    /// Morphospace selection: nearest prototype to the query point in (λ, D).
-    fn select_prototype(&self, lambda: f32, d: f32) -> usize {
-        nearest_proto(&self.protos, lambda, d)
-    }
-
-    // --- 4. shedding --------------------------------------------------------
-    fn shed(&mut self) {
-        let p = self.params.clone();
-        // A module is shed if its vigor dropped below v̄min (but never the root
-        // unless senescence has fully drained it).
-        let to_shed: Vec<ModuleId> = self
-            .alive_ids()
-            .into_iter()
-            .filter(|&id| id != self.root && self.module(id).vigor < p.v_min)
-            .collect();
-        for id in to_shed {
-            // It may already have been removed as part of an ancestor's subtree.
-            if self.modules[id].is_some() {
-                self.remove_subtree(id);
-            }
-        }
-    }
-
-    fn remove_subtree(&mut self, id: ModuleId) {
-        // Detach from parent's child list.
-        if let Some(parent) = self.module(id).parent {
-            if let Some(pm) = self.modules[parent].as_mut() {
-                pm.children.retain(|(_, c)| *c != id);
-            }
-        }
-        // Remove descendants (collect first to avoid borrow issues).
-        let mut stack = vec![id];
-        let mut dead = Vec::new();
-        while let Some(cur) = stack.pop() {
-            if let Some(m) = self.modules[cur].as_ref() {
-                for (_, c) in &m.children {
-                    stack.push(*c);
-                }
-                dead.push(cur);
-            }
-        }
-        for d in dead {
-            self.modules[d] = None;
-        }
-    }
-
-    // --- storage helpers ----------------------------------------------------
-    fn alloc(&mut self, m: Module) -> ModuleId {
-        if let Some(slot) = self.modules.iter().position(|s| s.is_none()) {
-            self.modules[slot] = Some(m);
-            slot
-        } else {
-            self.modules.push(Some(m));
-            self.modules.len() - 1
-        }
-    }
-
-    fn pre_order(&self, root: ModuleId) -> Vec<ModuleId> {
-        let mut out = Vec::new();
-        let mut stack = vec![root];
-        while let Some(id) = stack.pop() {
-            out.push(id);
-            for (_, c) in &self.module(id).children {
-                stack.push(*c);
-            }
-        }
-        out
-    }
-
-    fn post_order(&self, root: ModuleId) -> Vec<ModuleId> {
-        let mut pre = self.pre_order(root);
-        pre.reverse();
-        pre
-    }
-
-    /// Total physiological "height" reached: max world-Y over the skeleton.
-    pub fn height(&self) -> f32 {
-        self.skeleton()
-            .iter()
-            .map(|s| s.b.y.max(s.a.y))
-            .fold(0.0, f32::max)
-    }
-
-    /// Shape metrics about the plant's local origin (assumed at its base):
-    /// `(height, crown_radius, apex_offset)` where crown_radius is the max
-    /// horizontal reach of any node and apex_offset is the horizontal distance
-    /// of the highest node from the trunk axis (a measure of how much the
-    /// leading shoot leans/arcs over rather than rising straight).
-    pub fn shape(&self) -> (f32, f32, f32) {
-        let base = self.origin;
-        let mut height = 0.0f32;
-        let mut crown_radius = 0.0f32;
-        let mut best_y = f32::MIN;
-        let mut apex_offset = 0.0f32;
-        for s in self.skeleton() {
-            for p in [s.a, s.b] {
-                let dx = p.x - base.x;
-                let dz = p.z - base.z;
-                let horiz = (dx * dx + dz * dz).sqrt();
-                height = height.max(p.y - base.y);
-                crown_radius = crown_radius.max(horiz);
-                if p.y > best_y {
-                    best_y = p.y;
-                    apex_offset = horiz;
-                }
-            }
-        }
-        (height, crown_radius, apex_offset)
-    }
-
-    // --- geometry: derive a render skeleton ---------------------------------
-    //
-    // `place()` builds a single global node graph spanning all modules (a child
-    // module's root node is the *same* point as the parent terminal it attaches
-    // to, so there is one continuous skeleton). For each node we compute:
-    //   * world position: parent + orientation·dir·ℓ + tropism offset, where
-    //     ℓ = min(ℓmax, β·a_b) (Eq. 9) and a_b = max(0, a_u − a_n) (Eq. 7) gives
-    //     acropetal (root-first) extension within the module;
-    //   * tropism offset τ(a_b) = (g1·g2 / (a_b + g1))·ĝ (Eq. 10), bending young
-    //     segments and leaving old ones set;
-    //   * diameter via the Pipe Model d = √Σ d_child² (Eq. 8), φ at the tips.
-    //
-    // Because modules are visited parent-before-child and nodes parent-before-
-    // child, every node's parent has a smaller global id — so a reverse-id sweep
-    // is a valid post-order for the diameter accumulation.
-    fn place(&self) -> Placement {
-        let p = &self.params;
-        let mut pos: Vec<Vec3> = Vec::new();
-        let mut parent: Vec<Option<usize>> = Vec::new();
-        let mut children: Vec<Vec<usize>> = Vec::new();
-        let mut gid_module: Vec<ModuleId> = Vec::new();
-        let mut module_root_gid: HashMap<ModuleId, usize> = HashMap::new();
-        // Module orientations are stored *relative to parent*; accumulate world
-        // orientation parent-before-child (pre-order guarantees the ordering).
-        let mut world_orient: HashMap<ModuleId, Quat> = HashMap::new();
-        let mut module_base: HashMap<ModuleId, Vec3> = HashMap::new();
-
-        // Plant root node.
-        pos.push(self.module(self.root).base_pos);
-        parent.push(None);
-        children.push(Vec::new());
-        gid_module.push(self.root);
-        module_root_gid.insert(self.root, 0);
-
-        for &mid in &self.pre_order(self.root) {
-            let m = self.module(mid);
-            let proto = &self.protos[m.proto];
-            let au = m.age;
-            let max_depth = proto.nodes.iter().map(|n| n.depth).max().unwrap_or(1).max(1) as f32;
-
-            let w_orient = match m.parent {
-                None => m.orientation,
-                Some(par) => world_orient[&par] * m.orientation,
-            };
-            world_orient.insert(mid, w_orient);
-            module_base.insert(mid, pos[module_root_gid[&mid]]);
-
-            let mut local_gid = vec![usize::MAX; proto.nodes.len()];
-            local_gid[0] = module_root_gid[&mid];
-
-            for ln in 1..proto.nodes.len() {
-                let base_ln = proto.nodes[ln].parent.unwrap();
-                let base_gid = local_gid[base_ln];
-
-                // Acropetal timing: deeper base nodes start later (Eq. 7).
-                let a_n = (proto.nodes[base_ln].depth as f32 / max_depth) * p.a_mature;
-                let a_b = (au - a_n).max(0.0);
-                let len = (p.beta * a_b).min(p.l_max);
-
-                let dir_world = (w_orient * proto.seg_dir_local(ln)).normalize_or_zero();
-                let tropism = if a_b > 1e-6 {
-                    (p.g1 * p.g2 / (a_b + p.g1)) * Vec3::NEG_Y
-                } else {
-                    Vec3::ZERO
-                };
-                let node_pos = pos[base_gid] + dir_world * len + tropism;
-
-                let gid = pos.len();
-                pos.push(node_pos);
-                parent.push(Some(base_gid));
-                children.push(Vec::new());
-                gid_module.push(mid);
-                children[base_gid].push(gid);
-                local_gid[ln] = gid;
-            }
-
-            // A child module's root node *is* the terminal node it hangs from.
-            for (term, cid) in &m.children {
-                module_root_gid.insert(*cid, local_gid[*term]);
-            }
-        }
-
-        // Pipe-Model diameters (Eq. 8), post-order via reverse global id.
-        let n = pos.len();
-        let mut diam = vec![p.phi; n];
-        for g in (0..n).rev() {
-            if !children[g].is_empty() {
-                let s: f32 = children[g].iter().map(|&c| diam[c] * diam[c]).sum();
-                diam[g] = s.sqrt().max(p.phi);
-            }
-        }
-
-        Placement {
-            pos,
-            parent,
-            gid_module,
-            diam,
-            world_orient,
-            module_base,
-        }
-    }
-
-    pub fn skeleton(&self) -> Vec<Segment> {
-        let pl = self.place();
-        let mut segs = Vec::new();
-        for g in 0..pl.pos.len() {
-            if let Some(pg) = pl.parent[g] {
-                if (pl.pos[g] - pl.pos[pg]).length() < 1e-5 {
-                    continue;
-                }
-                segs.push(Segment {
-                    a: pl.pos[pg],
-                    b: pl.pos[g],
-                    ra: pl.diam[pg] * 0.5,
-                    rb: pl.diam[g] * 0.5,
-                });
-            }
-        }
-        segs
-    }
-
-    /// Leaf attachment points for foliage: every thin twig node (diameter near
-    /// φ) that has actually extended, returned as (world position, outward
-    /// segment direction). Foliage clusters are drawn at these points.
-    pub fn leaves(&self) -> Vec<(Vec3, Vec3)> {
-        let pl = self.place();
-        let twig = self.params.phi * 2.5;
-        let mut out = Vec::new();
-        for g in 0..pl.pos.len() {
-            let pg = match pl.parent[g] {
-                Some(pg) => pg,
-                None => continue,
-            };
-            let seg = pl.pos[g] - pl.pos[pg];
-            if pl.diam[g] <= twig && seg.length() > 0.15 {
-                out.push((pl.pos[g], seg.normalize()));
-            }
-        }
-        out
-    }
-
-    /// Spherical bounding volume B_u per module (Sec. 5.2.1): centre = centroid
-    /// of the module's node geometry, radius = enclosing radius (+ small margin).
-    /// Returns a map keyed by module id. Modules with no developed geometry yet
-    /// are given a small sphere at their attachment point.
-    pub fn module_spheres(&self) -> HashMap<ModuleId, BSphere> {
-        Self::spheres_from(&self.place())
-    }
-
-    /// Centroids of fully-mature modules only — these should be frozen, so any
-    /// per-step movement here is genuine flicker (not growth).
-    pub fn mature_centroids(&self) -> HashMap<ModuleId, Vec3> {
-        let am = self.params.a_mature;
-        self.module_spheres()
-            .into_iter()
-            .filter(|(id, _)| self.module(*id).age >= am)
-            .map(|(id, s)| (id, s.centre))
-            .collect()
-    }
-
-    /// World-space centre of each module (for shadow-grid deposition).
-    pub fn module_centres(&self) -> Vec<(ModuleId, Vec3)> {
-        Self::spheres_from(&self.place())
-            .into_iter()
-            .map(|(id, s)| (id, s.centre))
-            .collect()
-    }
-
-    fn spheres_from(pl: &Placement) -> HashMap<ModuleId, BSphere> {
-        let mut acc: HashMap<ModuleId, Vec<Vec3>> = HashMap::new();
-        for g in 0..pl.pos.len() {
-            acc.entry(pl.gid_module[g]).or_default().push(pl.pos[g]);
-        }
-        let mut out = HashMap::new();
-        for (mid, pts) in acc {
-            let centre = pts.iter().copied().fold(Vec3::ZERO, |a, b| a + b) / pts.len() as f32;
-            let radius = pts
-                .iter()
-                .map(|q| (*q - centre).length())
-                .fold(0.0f32, f32::max)
-                .max(0.05)
-                + 0.1;
-            out.insert(mid, BSphere { centre, radius });
-        }
-        out
-    }
-
-    /// Per-step orientation relaxation (Sec. 5.2.3, App. A.1). For every
-    /// non-root module, gradient-descend its orientation *relative to its
-    /// parent* to minimize f_distribution = ω1·f_collisions + ω2·f_tropism.
-    /// Running this once per step lets the crown progressively self-organize as
-    /// it grows (cf. the reorganizing trees of Fig. 11), driving the
-    /// intersection-volume ratio down (Fig. 15a).
-    fn optimize_orientations(&mut self) {
-        let p = self.params.clone();
-        let pl = self.place();
-        let spheres = Self::spheres_from(&pl);
-
-        // Compute all updates against the current placement, then apply (so the
-        // pass is a single synchronous relaxation step).
-        let mut updates: Vec<(ModuleId, Quat)> = Vec::new();
-        for mid in self.pre_order(self.root) {
-            let m = self.module(mid);
-            let par = match m.parent {
-                Some(par) => par,
-                None => continue, // root orientation is fixed (grows up)
-            };
-            // Only developing modules reorient (App. A.1 optimizes *new*
-            // modules). Once mature a module freezes, so settled structure
-            // stops moving — younger neighbours do the dodging. This is what
-            // keeps the crown from flickering every step.
-            if p.opt_freeze_settled && m.age >= p.a_mature {
-                continue;
-            }
-            let parent_world = pl.world_orient[&par];
-            let base = pl.module_base[&mid];
-            let proto = &self.protos[m.proto];
-            let local_c = proto.local_centroid();
-            let local_r = proto.local_radius();
-
-            // Exclusions: self, parent, and children (structurally adjacent).
-            let mut exclude: Vec<ModuleId> = vec![mid, par];
-            exclude.extend(m.children.iter().map(|(_, c)| *c));
-
-            // Skip modules that aren't actually colliding — there is nothing to
-            // resolve, so leave them put. This freezes spread-out tips and is
-            // what finally removes the flicker.
-            if p.opt_freeze_settled {
-                if let Some(&su) = spheres.get(&mid) {
-                    let mut cur = 0.0;
-                    for (&o, &so) in &spheres {
-                        if exclude.contains(&o) {
-                            continue;
-                        }
-                        cur += sphere_intersection_volume(su, so);
-                    }
-                    if cur < p.opt_collision_eps {
-                        continue;
-                    }
-                }
-            }
-
-            let cost = |rel: Quat| -> f32 {
-                let w = parent_world * rel;
-                let sphere = BSphere {
-                    centre: base + w * local_c,
-                    radius: local_r,
-                };
-                let mut f_col = 0.0;
-                for (&o, &so) in &spheres {
-                    if exclude.contains(&o) {
-                        continue;
-                    }
-                    f_col += sphere_intersection_volume(sphere, so);
-                }
-                let axis = (w * Vec3::Y).normalize_or_zero();
-                let f_trop = (p.tropism_set_angle.cos() - axis.dot(Vec3::Y)).abs();
-                p.omega1 * f_col + p.omega2 * f_trop
-            };
-
-            let mut rel = m.orientation;
-            let mut best = cost(rel);
-            for _ in 0..p.opt_iters {
-                let candidates = [
-                    rel * Quat::from_rotation_x(p.opt_angle),
-                    rel * Quat::from_rotation_x(-p.opt_angle),
-                    rel * Quat::from_rotation_z(p.opt_angle),
-                    rel * Quat::from_rotation_z(-p.opt_angle),
-                ];
-                let mut improved = false;
-                for c in candidates {
-                    let cc = cost(c);
-                    if cc < best - 1e-6 {
-                        best = cc;
-                        rel = c;
-                        improved = true;
-                    }
-                }
-                if !improved {
-                    break;
-                }
-            }
-
-            // Under-relaxation: move only a fraction of the way toward the
-            // optimized orientation, capped at opt_max_step radians. This damps
-            // the simultaneous-update oscillation and lets the crown settle.
-            let current = m.orientation;
-            let target = rel.normalize();
-            let angle = current.angle_between(target);
-            let damped = if angle > 1e-5 {
-                let s = p.opt_damping.min(p.opt_max_step / angle).clamp(0.0, 1.0);
-                current.slerp(target, s)
-            } else {
-                current
-            };
-            updates.push((mid, damped));
-        }
-
-        for (mid, rel) in updates {
-            self.module_mut(mid).orientation = rel;
-        }
-    }
 }
 
-/// A bounding sphere for a module.
+/// A bounding sphere for an internode.
 #[derive(Clone, Copy, Debug)]
 pub struct BSphere {
     pub centre: Vec3,
     pub radius: f32,
-}
-
-/// Internal placement of the whole plant as a flat global node graph.
-struct Placement {
-    pos: Vec<Vec3>,
-    parent: Vec<Option<usize>>,
-    /// Module id that each global node belongs to.
-    gid_module: Vec<ModuleId>,
-    diam: Vec<f32>,
-    /// World-space orientation of each module (relative orientations composed).
-    world_orient: HashMap<ModuleId, Quat>,
-    /// World-space position of each module's root node.
-    module_base: HashMap<ModuleId, Vec3>,
-}
-
-/// Voronoi-nearest prototype to a morphospace query point (λ, D).
-fn nearest_proto(protos: &[Prototype], lambda: f32, d: f32) -> usize {
-    let mut best = 0;
-    let mut best_d2 = f32::INFINITY;
-    for (i, proto) in protos.iter().enumerate() {
-        let dl = proto.lambda - lambda;
-        let dd = proto.determinacy - d;
-        let d2 = dl * dl + dd * dd;
-        if d2 < best_d2 {
-            best_d2 = d2;
-            best = i;
-        }
-    }
-    best
-}
-
-/// Growth-rate sigmoid S(x) = 3x² − 2x³ (Eq. 5), the smoothstep that ramps a
-/// module's development rate with its normalized vigor x ∈ [0,1]. S(0)=0,
-/// S(1)=1, S(0.5)=0.5, monotonically increasing, with zero slope at both ends.
-pub(crate) fn growth_sigmoid(x: f32) -> f32 {
-    let x = x.clamp(0.0, 1.0);
-    3.0 * x * x - 2.0 * x * x * x
 }
 
 /// Volume of the intersection (lens) of two spheres.
@@ -929,11 +744,9 @@ pub fn sphere_intersection_volume(a: BSphere, b: BSphere) -> f32 {
         return 0.0;
     }
     if d <= (r1 - r2).abs() {
-        // One sphere contained in the other.
         let r = r1.min(r2);
         return 4.0 / 3.0 * std::f32::consts::PI * r * r * r;
     }
-    // Standard sphere-sphere lens volume.
     let sum = r1 + r2;
     std::f32::consts::PI * (sum - d) * (sum - d)
         * (d * d + 2.0 * d * sum - 3.0 * (r1 - r2) * (r1 - r2))
@@ -943,336 +756,237 @@ pub fn sphere_intersection_volume(a: BSphere, b: BSphere) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::prototype::default_library;
 
     fn grow(lambda: f32, steps: u32) -> Plant {
         let mut params = PlantParams::default();
         params.lambda = lambda;
-        let mut plant = Plant::new(default_library(), params, Vec3::ZERO);
-        for _ in 0..steps {
-            plant.step(1.0);
-        }
-        plant
+        grow_with(params, steps)
     }
 
     fn grow_with(params: PlantParams, steps: u32) -> Plant {
-        let mut plant = Plant::new(default_library(), params, Vec3::ZERO);
+        let mut plant = Plant::new(params, Vec3::ZERO);
         for _ in 0..steps {
             plant.step(1.0);
         }
         plant
     }
 
-    #[test]
-    fn root_matures_and_branches() {
-        let plant = grow(0.72, 6);
-        // Root should have spawned its apical + lateral children by now.
-        assert!(
-            plant.module_count() > 1,
-            "expected branching, got {} modules",
-            plant.module_count()
-        );
-    }
+    // --- basic growth --------------------------------------------------------
 
     #[test]
-    fn orientation_optimization_reduces_collisions() {
-        // Sec. 5.2.3 / Fig. 15a: the environment-sensitive model must reduce the
-        // module intersection-volume ratio relative to the naive one. Measured
-        // in a deliberately dense, bushy crown (short segments, many modules) so
-        // there are real collisions to resolve.
-        let dense = |optimize: bool| {
-            let mut p = PlantParams::default();
-            p.lambda = 0.5;
-            p.l_max = 0.6;
-            p.v_root_max = 120.0;
-            p.v_max = 28.0;
-            p.collision_light = optimize;
-            p.optimize_orientation = optimize;
-            grow_with(p, 120).intersection_ratio()
-        };
-        let naive = dense(false);
-        let optimized = dense(true);
-
-        assert!(
-            optimized < 0.75 * naive,
-            "optimization should clearly cut overlap: naive {naive:.3} -> optimized {optimized:.3}"
-        );
-        assert!(
-            optimized < 0.05,
-            "optimized ratio {optimized:.3} should stay under the 5% target"
-        );
-    }
-
-    #[test]
-    fn settled_modules_do_not_flicker() {
-        // With the freeze/damping fix, mature modules in a crowded (bushy) crown
-        // must stop moving — no perpetual back-and-forth re-orientation.
-        let mut p = PlantParams::default();
-        p.lambda = 0.30;
-        p.collision_light = true;
-        p.optimize_orientation = true;
-        let mut plant = grow_with(p, 60);
-
-        let mut last = plant.mature_centroids();
-        let mut path = 0.0f32;
-        for _ in 0..20 {
-            plant.step(1.0);
-            let now = plant.mature_centroids();
-            for (id, p0) in &last {
-                if let Some(p1) = now.get(id) {
-                    path += (*p1 - *p0).length();
-                }
-            }
-            last = now;
-        }
-        let per = path / last.len().max(1) as f32;
-        assert!(per < 0.05, "settled modules still flicker: {per:.4} units/module");
-    }
-
-    #[test]
-    fn growth_stabilizes_below_unbounded() {
-        // Vigor splitting must drive tip vigor below v_min, bounding the tree.
-        let plant = grow(0.72, 200);
-        let n = plant.module_count();
-        assert!(n > 5, "tree too small: {n}");
-        assert!(n < 100_000, "tree did not stabilize: {n}");
+    fn seedling_grows_and_branches() {
+        let plant = grow(0.52, 12);
+        assert!(plant.module_count() > 3, "expected growth, got {}", plant.module_count());
+        // Some lateral axes must have formed (order ≥ 1 metamers exist).
+        let has_lateral = plant.alive_ids().iter().any(|&id| plant.node(id).order >= 1);
+        assert!(has_lateral, "no lateral branches formed");
     }
 
     #[test]
     fn skeleton_is_nonempty_and_finite() {
-        let plant = grow(0.72, 40);
+        let plant = grow(0.52, 30);
         let segs = plant.skeleton();
         assert!(!segs.is_empty());
         for s in &segs {
             assert!(s.a.is_finite() && s.b.is_finite(), "non-finite segment");
             assert!(s.ra > 0.0 && s.rb > 0.0, "non-positive radius");
-            // Pipe model: a segment is never thinner than φ at its tip.
-            assert!(s.rb >= 0.5 * 0.02 - 1e-6);
+            assert!(s.rb >= 0.5 * plant.params.phi - 1e-6, "tip thinner than φ");
         }
         assert!(plant.height() > 0.5, "tree barely grew: {}", plant.height());
     }
 
     #[test]
+    fn growth_stays_bounded() {
+        // The resource cap (v_base ≤ v_root_max) must bound the metamer count:
+        // per-bud resource falls below 1 as the tree fills, halting growth.
+        let plant = grow(0.55, 220);
+        let n = plant.module_count();
+        assert!(n > 10, "tree too small: {n}");
+        assert!(n < 6000, "tree did not stabilize: {n}");
+    }
+
+    #[test]
     fn excurrent_taller_than_decurrent() {
-        // High apical control should yield a taller (trunk-dominated) form than
-        // low apical control, for the same number of steps.
-        let tall = grow(0.9, 60).height();
-        let bushy = grow(0.2, 60).height();
-        assert!(
-            tall > bushy,
-            "excurrent ({tall:.2}) should exceed decurrent ({bushy:.2})"
-        );
+        // λ>0.5 favours the leader (excurrent → taller) vs λ<0.5 (decurrent).
+        let tall = grow(0.58, 90).height();
+        let bushy = grow(0.42, 90).height();
+        assert!(tall > bushy, "excurrent ({tall:.2}) should exceed decurrent ({bushy:.2})");
     }
 
-    #[test]
-    fn trunk_thicker_than_twigs() {
-        // Pipe Model: the basal segment must be the thickest.
-        let plant = grow(0.8, 60);
-        let segs = plant.skeleton();
-        let max_r = segs.iter().map(|s| s.ra).fold(0.0, f32::max);
-        let basal = segs
-            .iter()
-            .min_by(|a, b| a.a.y.total_cmp(&b.a.y))
-            .unwrap();
-        assert!(
-            basal.ra >= max_r - 1e-4,
-            "basal radius {} should be the largest {}",
-            basal.ra,
-            max_r
-        );
-    }
-
-    // ---------------------------------------------------------------------
-    // Simulation-correctness suite: one test per paper mechanism. These pin
-    // the *equations* (not just the look) so parameter tuning can't silently
-    // break a mechanism. They reach into private internals (same-module child)
-    // to check the exact invariant rather than a downstream symptom.
-    // ---------------------------------------------------------------------
-
-    #[test]
-    fn growth_sigmoid_is_a_smoothstep() {
-        // Eq. 5: S(x)=3x²−2x³ — endpoints 0/1, symmetric midpoint, monotone,
-        // and clamped outside [0,1].
-        assert!((growth_sigmoid(0.0)).abs() < 1e-6);
-        assert!((growth_sigmoid(1.0) - 1.0).abs() < 1e-6);
-        assert!((growth_sigmoid(0.5) - 0.5).abs() < 1e-6);
-        assert!((growth_sigmoid(-3.0)).abs() < 1e-6, "clamps below 0");
-        assert!((growth_sigmoid(7.0) - 1.0).abs() < 1e-6, "clamps above 1");
-        let mut prev = -1.0;
-        for i in 0..=20 {
-            let s = growth_sigmoid(i as f32 / 20.0);
-            assert!(s >= prev - 1e-6, "S must be monotonically increasing");
-            prev = s;
-        }
-    }
+    // --- simulation-correctness suite (one test per paper mechanism) ---------
 
     #[test]
     fn vigor_is_conserved_across_the_split() {
-        // Borchert–Honda redistribution (Eq. 2) is a *partition*: a parent's
-        // vigor is divided among its children, never created or destroyed.
-        // Checked right after a clean vigor pass (before develop/shed perturb
-        // the tree with freshly-attached estimates).
-        let mut plant = grow(0.6, 40);
+        // Borchert–Honda is a partition: at each internode the resource routed
+        // out (to children + active buds) equals the resource that reached it.
+        let mut plant = grow(0.55, 40);
+        plant.environment(None);
+        plant.light_pass();
         plant.vigor_pass();
         for id in plant.alive_ids() {
-            let m = plant.module(id);
-            if m.children.is_empty() {
+            let n = plant.node(id);
+            let order = n.order;
+            // Only internodes that actually route resource onward.
+            let has_outlet = !n.children.is_empty() || n.terminal_bud || n.lateral_bud;
+            if !has_outlet {
                 continue;
             }
-            let parent_v = m.vigor;
-            let kids_v: f32 = m.children.iter().map(|(_, c)| plant.module(*c).vigor).sum();
+            let mut out = n.term_resource + n.lat_resource;
+            for &c in &n.children {
+                out += plant.node(c).vigor;
+            }
+            // A child of the same order is the main axis; deeper is lateral —
+            // both already counted via children vigor above.
+            let _ = order;
+            let v = n.vigor;
             assert!(
-                (parent_v - kids_v).abs() <= 1e-3 * parent_v.max(1.0),
-                "module {id}: parent vigor {parent_v} != Σ children {kids_v}"
+                (v - out).abs() <= 1e-3 * v.max(1.0),
+                "internode {id}: vigor {v} != routed-out {out}"
             );
         }
     }
 
     #[test]
     fn vigor_split_obeys_apical_control() {
-        // Controlled split: a root with one apical + one lateral child carrying
-        // equal accumulated light. With equal Q the apical:lateral vigor ratio
-        // must be exactly λ:(1−λ) — the definition of apical control (Eq. 2).
+        // A seedling internode has exactly one terminal bud (main) and one
+        // lateral bud, with equal exposure ⇒ the split is exactly λ:(1−λ).
         fn apical_fraction(lambda: f32) -> f32 {
             let mut params = PlantParams::default();
             params.lambda = lambda;
-            let mut plant = Plant::new(default_library(), params, Vec3::ZERO);
-            let root = plant.root;
-            let proto = plant.module(root).proto;
-            let aterm = plant.protos[proto].terminals[0];
-            let lterm = *plant.protos[proto]
-                .terminals
-                .iter()
-                .find(|t| **t != aterm)
-                .expect("prototype needs a lateral terminal");
-            plant.attach_child(root, aterm, 5.0);
-            plant.attach_child(root, lterm, 5.0);
-            // New modules carry equal q_acc (=1) from Module::new.
+            let mut plant = Plant::new(params, Vec3::ZERO);
+            plant.environment(None);
+            plant.light_pass();
             plant.vigor_pass();
-            let mut av = 0.0;
-            let mut lv = 0.0;
-            for (t, c) in plant.module(root).children.clone() {
-                if t == aterm {
-                    av = plant.module(c).vigor;
-                } else {
-                    lv = plant.module(c).vigor;
-                }
-            }
-            av / (av + lv)
+            let n = plant.node(plant.root);
+            n.term_resource / (n.term_resource + n.lat_resource)
         }
-        assert!((apical_fraction(0.85) - 0.85).abs() < 0.02, "λ=0.85 leader share");
-        assert!((apical_fraction(0.50) - 0.50).abs() < 0.02, "λ=0.50 even split");
-        assert!((apical_fraction(0.30) - 0.30).abs() < 0.02, "λ=0.30 lateral-dominant");
+        assert!((apical_fraction(0.7) - 0.7).abs() < 0.02, "λ=0.7 leader share");
+        assert!((apical_fraction(0.5) - 0.5).abs() < 0.02, "λ=0.5 even split");
+        assert!((apical_fraction(0.3) - 0.3).abs() < 0.02, "λ=0.3 lateral-dominant");
     }
 
     #[test]
     fn light_accumulates_basipetally_to_the_root() {
-        // Eq. 1 accumulation: Q_acc(root) = Σ Q_local over the whole tree. With
-        // collisions and shadowing off, each Q_local = 1, so q_acc(root) must
-        // equal the module count — flux is conserved tip-to-base.
-        let mut plant = grow(0.6, 40);
-        plant.light_pass(&std::collections::HashMap::new(), None);
-        let total: f32 = plant
-            .alive_ids()
-            .iter()
-            .map(|id| plant.module(*id).q_local)
-            .sum();
-        let root_acc = plant.module(plant.root).q_acc;
-        assert!(
-            (root_acc - total).abs() < 1e-3,
-            "q_acc(root) {root_acc} != Σ q_local {total}"
-        );
-        assert!(
-            (total - plant.module_count() as f32).abs() < 1e-3,
-            "with Q=1 the total should be the module count"
-        );
+        // Q_acc(root) must equal the sum of every internode's bud light Q_self.
+        let mut plant = grow(0.55, 40);
+        plant.environment(None);
+        plant.light_pass();
+        let total: f32 = plant.alive_ids().iter().map(|&id| plant.q_self(id)).sum();
+        let root_acc = plant.node(plant.root).q_acc;
+        assert!((root_acc - total).abs() < 1e-3, "q_acc(root) {root_acc} != Σ Q_self {total}");
+    }
+
+    #[test]
+    fn bud_produces_floor_v_metamers_capped_per_step() {
+        // The metamer rule (Pałubicki §4.2): a bud with resource v sprouts
+        // n = ⌊v⌋ metamers of length l = v/⌊v⌋ (so a shoot's length ∝ vigor),
+        // capped per step at MAX_SHOOT.
+        let sprout = |v: f32| -> (usize, f32) {
+            let params = PlantParams::default();
+            let mut plant = Plant::new(params, Vec3::ZERO);
+            plant.node_mut(plant.root).terminal_bud = true;
+            plant.node_mut(plant.root).lateral_bud = false;
+            plant.node_mut(plant.root).term_resource = v;
+            let before = plant.module_count();
+            plant.grow();
+            let added = plant.module_count() - before;
+            let len = plant
+                .alive_ids()
+                .into_iter()
+                .find(|&id| id != plant.root)
+                .map(|id| plant.node(id).length)
+                .unwrap_or(0.0);
+            (added, len)
+        };
+        let il = PlantParams::default().internode_len;
+        // Below the cap: exactly ⌊v⌋ metamers, length internode_len·(v/⌊v⌋).
+        let (n, len) = sprout(1.6);
+        assert_eq!(n, 1, "v=1.6 ⇒ 1 metamer");
+        assert!((len - il * 1.6).abs() < 1e-4, "length {len} != {}", il * 1.6);
+        // At/over the cap: clamped to MAX_SHOOT metamers.
+        let (n, _) = sprout(9.0);
+        assert_eq!(n, MAX_SHOOT as usize, "v=9 ⇒ capped at MAX_SHOOT={MAX_SHOOT}");
     }
 
     #[test]
     fn pipe_model_diameter_is_the_quadratic_sum_of_children() {
-        // Eq. 8: an internal node's diameter d = sqrt(Σ d_child²), floored at φ;
-        // a leaf node sits exactly at φ.
-        let plant = grow(0.6, 50);
-        let pl = plant.place();
-        let n = pl.pos.len();
-        let mut kids: Vec<Vec<usize>> = vec![Vec::new(); n];
-        for g in 0..n {
-            if let Some(par) = pl.parent[g] {
-                kids[par].push(g);
-            }
-        }
+        // Eq. 8: an internode's diameter is √(Σ d_child²), floored at φ; a tip
+        // sits exactly at φ.
+        let plant = grow(0.55, 50);
         let phi = plant.params.phi;
-        for g in 0..n {
-            if kids[g].is_empty() {
-                assert!((pl.diam[g] - phi).abs() < 1e-4, "leaf {g} diam {} != φ", pl.diam[g]);
+        for id in plant.alive_ids() {
+            let n = plant.node(id);
+            if n.children.is_empty() {
+                assert!((n.diam - phi).abs() < 1e-4, "tip {id} diam {} != φ", n.diam);
             } else {
-                let expect = kids[g]
+                let expect = n
+                    .children
                     .iter()
-                    .map(|&c| pl.diam[c] * pl.diam[c])
+                    .map(|&c| plant.node(c).diam.powi(2))
                     .sum::<f32>()
                     .sqrt()
                     .max(phi);
-                assert!(
-                    (pl.diam[g] - expect).abs() < 1e-3,
-                    "node {g} diam {} != sqrt-sum-of-children {expect}",
-                    pl.diam[g]
-                );
+                assert!((n.diam - expect).abs() < 1e-3, "node {id} diam {} != {expect}", n.diam);
             }
         }
     }
 
     #[test]
-    fn no_living_module_sits_below_the_shedding_threshold() {
-        // Eq.-2 shedding invariant: after a step every living non-root module
-        // holds vigor ≥ v̄min (weaker ones were shed). Guards the cull pass.
-        let plant = grow(0.6, 60);
-        let vmin = plant.params.v_min;
-        for id in plant.alive_ids() {
-            if id == plant.root {
-                continue;
-            }
-            assert!(
-                plant.module(id).vigor >= vmin - 1e-3,
-                "module {id} vigor {} below v_min {vmin}",
-                plant.module(id).vigor
-            );
-        }
+    fn pipe_model_thickens_the_trunk() {
+        // The basal (trunk) internode must be the thickest — it carries every
+        // leaf's pipe.
+        let plant = grow(0.6, 70);
+        let trunk = plant.node(plant.root).diam;
+        let max_d = plant
+            .alive_ids()
+            .iter()
+            .map(|&id| plant.node(id).diam)
+            .fold(0.0, f32::max);
+        assert!((trunk - max_d).abs() < 1e-4, "trunk {trunk} should be thickest {max_d}");
     }
 
     #[test]
     fn senescence_drains_root_vigor_past_pmax() {
-        // Sec. 6.3: past p_max the root allotment ramps linearly to 0, so an
-        // over-age plant is starved (the basis for death/gap dynamics).
+        // Past p_max the resource ramps to zero (basis for death/gap dynamics).
         let mut params = PlantParams::default();
         params.p_max = 20.0;
-        let mut plant = Plant::new(default_library(), params, Vec3::ZERO);
+        let mut plant = Plant::new(params, Vec3::ZERO);
         for _ in 0..15 {
             plant.step(1.0);
         }
+        plant.environment(None);
+        plant.light_pass();
         plant.vigor_pass();
-        let young = plant.module(plant.root).vigor;
-        // Push well past p_max (fully senesced ≈ 2·p_max).
+        let young = plant.node(plant.root).vigor;
         for _ in 0..30 {
             plant.step(1.0);
         }
+        plant.environment(None);
+        plant.light_pass();
         plant.vigor_pass();
-        let old = plant.module(plant.root).vigor;
+        let old = plant.node(plant.root).vigor;
         assert!(old < young, "root vigor should fall under senescence: {young} -> {old}");
-        assert!(old <= 1e-3, "well past 2·p_max the root should be fully drained, got {old}");
+        assert!(old <= 1e-3, "well past 2·p_max the root should be drained, got {old}");
     }
 
     #[test]
-    fn branch_segments_never_exceed_lmax_plus_tropism() {
-        // Eq. 9: ℓ = min(ℓmax, β·a_b). The only thing that can push a placed
-        // segment past ℓmax is the tropism offset (≤ |g2|), so that bounds it.
+    fn shedding_drops_starved_branches() {
+        // With a high shed threshold and a starved (zero-light) crown, lateral
+        // branches must be shed (Pałubicki §4.4).
         let mut params = PlantParams::default();
-        params.l_max = 1.0;
-        params.beta = 1.0;
-        let plant = grow_with(params, 80);
-        let bound = 1.0 + plant.params.g2.abs() + 1e-3;
-        for s in plant.skeleton() {
-            let len = (s.b - s.a).length();
-            assert!(len <= bound, "segment length {len} exceeds ℓmax+|g2| ({bound})");
+        params.shed_ratio = 100.0; // shed essentially everything lateral & old
+        let mut plant = Plant::new(params, Vec3::ZERO);
+        for _ in 0..20 {
+            plant.step(1.0);
         }
+        let with_laterals = plant.alive_ids().iter().filter(|&&id| plant.node(id).order >= 1).count();
+        // Starve and age the crown, then shed.
+        for id in plant.alive_ids() {
+            plant.node_mut(id).q_acc = 0.0;
+            plant.node_mut(id).age = 100.0;
+        }
+        plant.shed();
+        let after = plant.alive_ids().iter().filter(|&&id| plant.node(id).order >= 1).count();
+        assert!(after < with_laterals, "shedding removed nothing: {with_laterals} -> {after}");
     }
 }

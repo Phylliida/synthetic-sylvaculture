@@ -12,7 +12,6 @@ mod ecosystem;
 mod mesh;
 mod overlay;
 mod plant;
-mod prototype;
 mod species;
 
 use ecosystem::{biome_name, Climate, Ecosystem};
@@ -21,7 +20,7 @@ use plant::{Plant, PlantParams};
 use three_d::*;
 
 fn make_plant(params: PlantParams) -> Plant {
-    Plant::new(prototype::default_library(), params, gvec3(0.0, 0.0, 0.0))
+    Plant::new(params, gvec3(0.0, 0.0, 0.0))
 }
 
 fn make_bark(context: &Context, rgb: (u8, u8, u8)) -> PhysicalMaterial {
@@ -240,70 +239,23 @@ fn run_stats() {
         );
     }
 
-    println!("\nflicker: back-and-forth wiggle of mature modules (path−net over 30 steps), λ=0.30:");
-    for (label, committed) in [("committed", true), ("fixed", false)] {
+    println!("\nmetamer model: apical-control λ sweep (excurrent↔decurrent), 110 steps:");
+    for lambda in [0.42f32, 0.48, 0.52, 0.58] {
         let mut params = PlantParams::default();
-        params.lambda = 0.30;
-        params.collision_light = true;
-        params.optimize_orientation = true;
-        if committed {
-            // emulate the committed milestone-2 optimizer: undamped, no freeze.
-            params.opt_damping = 1.0;
-            params.opt_freeze_settled = false;
-        }
+        params.lambda = lambda;
         let mut plant = make_plant(params);
-        for _ in 0..60 {
+        for _ in 0..110 {
             plant.step(1.0);
         }
-        let start = plant.mature_centroids();
-        let mut last = start.clone();
-        let mut path: std::collections::HashMap<usize, f32> = std::collections::HashMap::new();
-        for _ in 0..30 {
-            plant.step(1.0);
-            let now = plant.mature_centroids();
-            for (id, p0) in &last {
-                if let Some(p1) = now.get(id) {
-                    *path.entry(*id).or_insert(0.0) += (*p1 - *p0).length();
-                }
-            }
-            last = now;
-        }
-        // wiggle = path travelled minus net displacement (pure oscillation).
-        let mut wig = 0.0f32;
-        let mut n = 0u32;
-        for (id, &p) in &path {
-            if let (Some(s), Some(e)) = (start.get(id), last.get(id)) {
-                wig += p - (*e - *s).length();
-                n += 1;
-            }
-        }
+        let (h, crown, apex) = plant.shape();
         println!(
-            "  {label:<9}  avg wiggle {:.4} units over 30 steps",
-            if n > 0 { wig / n as f32 } else { 0.0 }
-        );
-    }
-
-    println!("\norientation optimization vs naive (Fig. 15a metric, dense crown, 120 steps):");
-    for (label, opt) in [("naive", false), ("optimized", true)] {
-        // A deliberately dense, bushy crown (short segments, many modules) so
-        // there are real collisions for the optimizer to resolve.
-        let mut params = PlantParams::default();
-        params.lambda = 0.5;
-        params.l_max = 0.6;
-        params.v_root_max = 120.0;
-        params.v_max = 28.0;
-        params.collision_light = opt;
-        params.optimize_orientation = opt;
-        let mut plant = make_plant(params);
-        for _ in 0..120 {
-            plant.step(1.0);
-        }
-        println!(
-            "  {:<9}  modules {:>4}  intersection-volume ratio {:>6.1}%  height {:.2}",
-            label,
+            "  λ={lambda:.2}  metamers {:>4}  height {:5.1}  crown {:.1}  spread {:.2}  apex_lean {:.2}  overlap {:.1}%",
             plant.module_count(),
+            h,
+            crown,
+            crown / h.max(1e-3),
+            apex / h.max(1e-3),
             100.0 * plant.intersection_ratio(),
-            plant.height()
         );
     }
 }
@@ -798,9 +750,9 @@ fn main() {
         )
     };
 
-    println!("Synthetic Sylvaculture — single plant growth");
-    println!("  Space play/pause · S step · R reset · ←/→ λ · ↑/↓ growth rate");
-    println!("  N next species · O orientation-opt · L collision-light · F foliage");
+    println!("Synthetic Sylvaculture — single plant growth (metamer model)");
+    println!("  Space play/pause · S step · R reset · ←/→ apical control λ · ↑/↓ growth rate");
+    println!("  N next species · F foliage · mouse orbit/zoom");
     println!("  start species: {}  (λ={:.2}, D={:.2})", species[sp_idx].name, params.lambda, params.determinacy);
 
     window.render_loop(move |mut frame_input| {
@@ -838,14 +790,6 @@ fn main() {
                         params.gp = (params.gp - 0.05).clamp(0.05, 1.0);
                         reset = true;
                     }
-                    Key::O => {
-                        params.optimize_orientation = !params.optimize_orientation;
-                        reset = true;
-                    }
-                    Key::L => {
-                        params.collision_light = !params.collision_light;
-                        reset = true;
-                    }
                     Key::F => {
                         show_foliage = !show_foliage;
                         println!("[foliage {}]", if show_foliage { "on" } else { "off" });
@@ -869,16 +813,10 @@ fn main() {
             accum_ms = 0.0;
             dirty = true;
             println!(
-                "[reset] λ={:.2}  gp={:.2}  orient-opt={}  collision-light={}  ({})",
+                "[reset] λ={:.2}  gp={:.2}  ({})",
                 params.lambda,
                 params.gp,
-                params.optimize_orientation,
-                params.collision_light,
-                if params.lambda > 0.5 {
-                    "excurrent"
-                } else {
-                    "decurrent"
-                }
+                if params.lambda > 0.5 { "excurrent" } else { "decurrent" }
             );
         }
 

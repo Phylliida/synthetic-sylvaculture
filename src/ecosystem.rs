@@ -5,7 +5,6 @@
 //! Global shadowing, seeding, and climate arrive in later stages.
 
 use crate::plant::{ModuleId, Plant, Segment};
-use crate::prototype::default_library;
 use crate::species::{self, Species};
 use glam::{vec3, Vec3};
 use rand::{Rng, SeedableRng};
@@ -187,7 +186,7 @@ impl Ecosystem {
         let o = sp.adaptation(self.climate.temp, self.climate.precip);
         let mut params = sp.params.clone();
         params.v_root_max *= o; // total growth potential scales with adaptation
-        Plant::new(default_library(), params, pos)
+        Plant::new(params, pos)
     }
 
     /// Pick a species with probability proportional to its climate adaptation,
