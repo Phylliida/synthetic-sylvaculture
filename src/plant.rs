@@ -135,7 +135,7 @@ impl Default for PlantParams {
             tropism_up: 0.30,
             p_max: 1.0e9,
             shade_tolerance: 0.0,
-            shed_ratio: 0.0,
+            shed_ratio: 0.35, // shed lateral branches whose mean light < 0.35
             envelope_height: 14.0,
             envelope_radius: 4.0,
             marker_count: 800,
@@ -175,6 +175,12 @@ struct Internode {
     v_grow: Vec3,
     /// Basipetally accumulated light through this internode's subtree.
     q_acc: f32,
+    /// Current light exposure (the global-shadow level g, independent of free
+    /// space). Shedding (Pałubicki §4.4) drops a lateral branch whose mean
+    /// light_level is low — i.e. one that has been overtopped/shaded — which
+    /// clears lower branches into a clean bole. Age-independent (unlike a
+    /// cumulative sum), so single open-grown trees (g=1) never self-prune.
+    light_level: f32,
     /// Resource v reaching this internode (acropetal).
     vigor: f32,
     /// Resource routed to the terminal / lateral bud this cycle.
@@ -220,6 +226,7 @@ impl Plant {
             q_bud: 1.0,
             v_grow: Vec3::Y,
             q_acc: 1.0,
+            light_level: 0.0,
             vigor: 0.0,
             term_resource: 0.0,
             lat_resource: 0.0,
@@ -378,10 +385,14 @@ impl Plant {
         }
         self.markers = kept;
 
-        // (c) set Q (space × light) and the growth direction per metamer.
+        // (c) set Q (space × light), the growth direction, and record the
+        //     current light level (the actual light g, independent of free
+        //     space — a metamer's foliage is lit even where no markers remain;
+        //     this is what shedding reads).
         for &id in &ids {
             let g = qg.and_then(|map| map.get(&id).copied()).unwrap_or(1.0);
             let light = stol + (1.0 - stol) * g;
+            self.node_mut(id).light_level = light;
             match sum_dir.get(&id) {
                 Some(v) => {
                     self.node_mut(id).q_bud = light;
@@ -566,6 +577,7 @@ impl Plant {
                 q_bud: 1.0,
                 v_grow: Vec3::ZERO,
                 q_acc: 1.0,
+                light_level: 0.0,
                 vigor: 0.0,
                 term_resource: 0.0,
                 lat_resource: 0.0,
@@ -592,35 +604,45 @@ impl Plant {
         (d * angle.cos() + radial * angle.sin()).normalize_or_zero()
     }
 
-    // --- 5. shedding: drop starved lateral branches --------------------------
+    // --- 5. shedding: drop starved lateral branches (Pałubicki §4.4) ---------
+    // A lateral branch whose mean current light falls below the threshold is a
+    // net liability and is shed — overtopped/shaded lower branches drop, leaving
+    // a clean bole. Uses the light *level* (g), not q_acc (which is ~0 once a
+    // mature tree has spent its markers) and not a cumulative sum (which would
+    // conflate a young lit branch with an old shaded one).
     fn shed(&mut self) {
         let p = self.params.clone();
         if p.shed_ratio <= 0.0 {
             return;
         }
-        // subtree internode counts (post-order).
+        // Subtree internode count and summed current light (post-order); the
+        // ratio light/size is the branch's mean light level.
         let order = self.post_order(self.root);
         let mut size: HashMap<ModuleId, u32> = HashMap::new();
+        let mut light: HashMap<ModuleId, f32> = HashMap::new();
         for &id in &order {
             let mut s = 1u32;
+            let mut lt = self.node(id).light_level;
             for &c in &self.node(id).children {
                 s += size.get(&c).copied().unwrap_or(0);
+                lt += light.get(&c).copied().unwrap_or(0.0);
             }
             size.insert(id, s);
+            light.insert(id, lt);
         }
-        // A lateral-axis base is an internode whose parent has a lower order.
+        // Candidates: the base of a lateral axis (parent of lower order), old
+        // enough to have had a fair chance to gather. Never the trunk (order 0).
         let mut to_shed: Vec<ModuleId> = Vec::new();
         for &id in &order {
             let n = self.node(id);
-            if n.order == 0 || n.age < 6.0 {
+            if n.order == 0 || n.age < 12.0 {
                 continue;
             }
             let is_axis_base = n.parent.map(|pp| self.node(pp).order < n.order).unwrap_or(false);
             if !is_axis_base {
                 continue;
             }
-            let s = size[&id] as f32;
-            if n.q_acc / s < p.shed_ratio {
+            if light[&id] / (size[&id] as f32) < p.shed_ratio {
                 to_shed.push(id);
             }
         }
@@ -1112,10 +1134,11 @@ mod tests {
         }
         let with_laterals = plant.alive_ids().iter().filter(|&&id| plant.node(id).order >= 1).count();
         assert!(with_laterals > 0, "expected laterals to have formed");
-        // Starve and age the crown, enable shedding, then shed.
-        plant.params.shed_ratio = 100.0;
+        // Drop the crown into shade (light_level 0) and age it, set a shed
+        // threshold above that, then shed.
+        plant.params.shed_ratio = 0.5;
         for id in plant.alive_ids() {
-            plant.node_mut(id).q_acc = 0.0;
+            plant.node_mut(id).light_level = 0.0;
             plant.node_mut(id).age = 100.0;
         }
         plant.shed();
