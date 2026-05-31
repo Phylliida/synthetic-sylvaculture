@@ -206,6 +206,11 @@ pub struct Plant {
     pub origin: Vec3,
     /// Live free-space markers (Pałubicki §4.1); consumed as the tree grows.
     markers: Vec<Vec3>,
+    /// Smoothed carbon balance: an EMA of resource captured per metamer. When it
+    /// stays low the plant can't pay its upkeep and is culled (carbon-starvation
+    /// mortality). Starts healthy; the EMA prevents a transient shading from
+    /// killing an established tree.
+    health: f32,
 }
 
 impl Plant {
@@ -245,7 +250,14 @@ impl Plant {
             age: 0.0,
             origin,
             markers,
+            health: 1.0,
         }
+    }
+
+    /// Smoothed carbon balance (resource captured per metamer, EMA). Low ⇒ the
+    /// plant cannot pay its upkeep (carbon starvation).
+    pub fn health(&self) -> f32 {
+        self.health
     }
 
     fn node(&self, id: ModuleId) -> &Internode {
@@ -292,6 +304,14 @@ impl Plant {
         self.environment(qg, space);
         self.light_pass();
         self.vigor_pass();
+        // Carbon balance: the mean light the foliage receives, smoothed. This is
+        // size-independent (a mean over metamers) and floored by shade tolerance
+        // (light_level ≥ s_tol), so a shade-tolerant species survives in shade
+        // while an overtopped intolerant one starves — the engine of succession.
+        let ids = self.alive_ids();
+        let mean_light =
+            ids.iter().map(|&id| self.node(id).light_level).sum::<f32>() / ids.len().max(1) as f32;
+        self.health = self.health * 0.9 + mean_light * 0.1;
         self.grow();
         self.shed();
         self.recompute_diameters();

@@ -14,6 +14,12 @@ const FIELD_DENSITY: f32 = 0.6;
 const OCC_R: f32 = 1.1;
 const PER_R: f32 = 2.8;
 const PER_COS: f32 = 0.3;
+/// Carbon-starvation mortality: a plant older than CARBON_ESTABLISH steps dies
+/// once its smoothed carbon balance (mean foliage light) falls below
+/// CARBON_THRESHOLD — too shaded to pay its upkeep. Shade tolerance floors a
+/// species' light, so tolerant climax species survive shade that kills pioneers.
+const CARBON_ESTABLISH: f32 = 30.0;
+const CARBON_THRESHOLD: f32 = 0.18;
 use glam::{vec3, Vec3};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -297,15 +303,19 @@ impl Ecosystem {
         }
     }
 
-    /// Remove senesced or fully-suppressed plants, opening gaps (Sec. 4.2).
+    /// Remove plants that die, opening gaps (Sec. 4.2): old age (senescence), or
+    /// **carbon starvation** — an established plant whose smoothed carbon balance
+    /// (resource captured per metamer) has fallen below what it needs to pay its
+    /// upkeep. The latter is competition-driven death: overtopped, shaded trees
+    /// can no longer sustain their wood and die, sharpening succession.
     fn cull_dead(&mut self) {
         let dead: Vec<bool> = self
             .plants
             .iter()
             .map(|p| {
                 let senesced = p.age >= 1.9 * p.params.p_max;
-                let suppressed = p.age > 50.0 && p.module_count() <= 1;
-                senesced || suppressed
+                let starved = p.age > CARBON_ESTABLISH && p.health() < CARBON_THRESHOLD;
+                senesced || starved
             })
             .collect();
         let mut i = 0;
