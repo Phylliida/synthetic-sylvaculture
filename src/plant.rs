@@ -373,7 +373,7 @@ impl Plant {
         for &id in &ids {
             let v = self.module(id).vigor;
             let x = ((v - p.v_min) / (p.v_max - p.v_min)).clamp(0.0, 1.0);
-            let s = 3.0 * x * x - 2.0 * x * x * x; // sigmoid S(x)
+            let s = growth_sigmoid(x); // smoothstep S(x) (Eq. 5)
             // Growth-rate floor lets low-vigor laterals develop (fuller crowns).
             let growth_rate = p.gp * (p.growth_floor + (1.0 - p.growth_floor) * s);
             let m = self.module_mut(id);
@@ -913,6 +913,14 @@ fn nearest_proto(protos: &[Prototype], lambda: f32, d: f32) -> usize {
     best
 }
 
+/// Growth-rate sigmoid S(x) = 3x² − 2x³ (Eq. 5), the smoothstep that ramps a
+/// module's development rate with its normalized vigor x ∈ [0,1]. S(0)=0,
+/// S(1)=1, S(0.5)=0.5, monotonically increasing, with zero slope at both ends.
+pub(crate) fn growth_sigmoid(x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    3.0 * x * x - 2.0 * x * x * x
+}
+
 /// Volume of the intersection (lens) of two spheres.
 pub fn sphere_intersection_volume(a: BSphere, b: BSphere) -> f32 {
     let d = (a.centre - b.centre).length();
@@ -1072,5 +1080,199 @@ mod tests {
             basal.ra,
             max_r
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Simulation-correctness suite: one test per paper mechanism. These pin
+    // the *equations* (not just the look) so parameter tuning can't silently
+    // break a mechanism. They reach into private internals (same-module child)
+    // to check the exact invariant rather than a downstream symptom.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn growth_sigmoid_is_a_smoothstep() {
+        // Eq. 5: S(x)=3x²−2x³ — endpoints 0/1, symmetric midpoint, monotone,
+        // and clamped outside [0,1].
+        assert!((growth_sigmoid(0.0)).abs() < 1e-6);
+        assert!((growth_sigmoid(1.0) - 1.0).abs() < 1e-6);
+        assert!((growth_sigmoid(0.5) - 0.5).abs() < 1e-6);
+        assert!((growth_sigmoid(-3.0)).abs() < 1e-6, "clamps below 0");
+        assert!((growth_sigmoid(7.0) - 1.0).abs() < 1e-6, "clamps above 1");
+        let mut prev = -1.0;
+        for i in 0..=20 {
+            let s = growth_sigmoid(i as f32 / 20.0);
+            assert!(s >= prev - 1e-6, "S must be monotonically increasing");
+            prev = s;
+        }
+    }
+
+    #[test]
+    fn vigor_is_conserved_across_the_split() {
+        // Borchert–Honda redistribution (Eq. 2) is a *partition*: a parent's
+        // vigor is divided among its children, never created or destroyed.
+        // Checked right after a clean vigor pass (before develop/shed perturb
+        // the tree with freshly-attached estimates).
+        let mut plant = grow(0.6, 40);
+        plant.vigor_pass();
+        for id in plant.alive_ids() {
+            let m = plant.module(id);
+            if m.children.is_empty() {
+                continue;
+            }
+            let parent_v = m.vigor;
+            let kids_v: f32 = m.children.iter().map(|(_, c)| plant.module(*c).vigor).sum();
+            assert!(
+                (parent_v - kids_v).abs() <= 1e-3 * parent_v.max(1.0),
+                "module {id}: parent vigor {parent_v} != Σ children {kids_v}"
+            );
+        }
+    }
+
+    #[test]
+    fn vigor_split_obeys_apical_control() {
+        // Controlled split: a root with one apical + one lateral child carrying
+        // equal accumulated light. With equal Q the apical:lateral vigor ratio
+        // must be exactly λ:(1−λ) — the definition of apical control (Eq. 2).
+        fn apical_fraction(lambda: f32) -> f32 {
+            let mut params = PlantParams::default();
+            params.lambda = lambda;
+            let mut plant = Plant::new(default_library(), params, Vec3::ZERO);
+            let root = plant.root;
+            let proto = plant.module(root).proto;
+            let aterm = plant.protos[proto].terminals[0];
+            let lterm = *plant.protos[proto]
+                .terminals
+                .iter()
+                .find(|t| **t != aterm)
+                .expect("prototype needs a lateral terminal");
+            plant.attach_child(root, aterm, 5.0);
+            plant.attach_child(root, lterm, 5.0);
+            // New modules carry equal q_acc (=1) from Module::new.
+            plant.vigor_pass();
+            let mut av = 0.0;
+            let mut lv = 0.0;
+            for (t, c) in plant.module(root).children.clone() {
+                if t == aterm {
+                    av = plant.module(c).vigor;
+                } else {
+                    lv = plant.module(c).vigor;
+                }
+            }
+            av / (av + lv)
+        }
+        assert!((apical_fraction(0.85) - 0.85).abs() < 0.02, "λ=0.85 leader share");
+        assert!((apical_fraction(0.50) - 0.50).abs() < 0.02, "λ=0.50 even split");
+        assert!((apical_fraction(0.30) - 0.30).abs() < 0.02, "λ=0.30 lateral-dominant");
+    }
+
+    #[test]
+    fn light_accumulates_basipetally_to_the_root() {
+        // Eq. 1 accumulation: Q_acc(root) = Σ Q_local over the whole tree. With
+        // collisions and shadowing off, each Q_local = 1, so q_acc(root) must
+        // equal the module count — flux is conserved tip-to-base.
+        let mut plant = grow(0.6, 40);
+        plant.light_pass(&std::collections::HashMap::new(), None);
+        let total: f32 = plant
+            .alive_ids()
+            .iter()
+            .map(|id| plant.module(*id).q_local)
+            .sum();
+        let root_acc = plant.module(plant.root).q_acc;
+        assert!(
+            (root_acc - total).abs() < 1e-3,
+            "q_acc(root) {root_acc} != Σ q_local {total}"
+        );
+        assert!(
+            (total - plant.module_count() as f32).abs() < 1e-3,
+            "with Q=1 the total should be the module count"
+        );
+    }
+
+    #[test]
+    fn pipe_model_diameter_is_the_quadratic_sum_of_children() {
+        // Eq. 8: an internal node's diameter d = sqrt(Σ d_child²), floored at φ;
+        // a leaf node sits exactly at φ.
+        let plant = grow(0.6, 50);
+        let pl = plant.place();
+        let n = pl.pos.len();
+        let mut kids: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for g in 0..n {
+            if let Some(par) = pl.parent[g] {
+                kids[par].push(g);
+            }
+        }
+        let phi = plant.params.phi;
+        for g in 0..n {
+            if kids[g].is_empty() {
+                assert!((pl.diam[g] - phi).abs() < 1e-4, "leaf {g} diam {} != φ", pl.diam[g]);
+            } else {
+                let expect = kids[g]
+                    .iter()
+                    .map(|&c| pl.diam[c] * pl.diam[c])
+                    .sum::<f32>()
+                    .sqrt()
+                    .max(phi);
+                assert!(
+                    (pl.diam[g] - expect).abs() < 1e-3,
+                    "node {g} diam {} != sqrt-sum-of-children {expect}",
+                    pl.diam[g]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_living_module_sits_below_the_shedding_threshold() {
+        // Eq.-2 shedding invariant: after a step every living non-root module
+        // holds vigor ≥ v̄min (weaker ones were shed). Guards the cull pass.
+        let plant = grow(0.6, 60);
+        let vmin = plant.params.v_min;
+        for id in plant.alive_ids() {
+            if id == plant.root {
+                continue;
+            }
+            assert!(
+                plant.module(id).vigor >= vmin - 1e-3,
+                "module {id} vigor {} below v_min {vmin}",
+                plant.module(id).vigor
+            );
+        }
+    }
+
+    #[test]
+    fn senescence_drains_root_vigor_past_pmax() {
+        // Sec. 6.3: past p_max the root allotment ramps linearly to 0, so an
+        // over-age plant is starved (the basis for death/gap dynamics).
+        let mut params = PlantParams::default();
+        params.p_max = 20.0;
+        let mut plant = Plant::new(default_library(), params, Vec3::ZERO);
+        for _ in 0..15 {
+            plant.step(1.0);
+        }
+        plant.vigor_pass();
+        let young = plant.module(plant.root).vigor;
+        // Push well past p_max (fully senesced ≈ 2·p_max).
+        for _ in 0..30 {
+            plant.step(1.0);
+        }
+        plant.vigor_pass();
+        let old = plant.module(plant.root).vigor;
+        assert!(old < young, "root vigor should fall under senescence: {young} -> {old}");
+        assert!(old <= 1e-3, "well past 2·p_max the root should be fully drained, got {old}");
+    }
+
+    #[test]
+    fn branch_segments_never_exceed_lmax_plus_tropism() {
+        // Eq. 9: ℓ = min(ℓmax, β·a_b). The only thing that can push a placed
+        // segment past ℓmax is the tropism offset (≤ |g2|), so that bounds it.
+        let mut params = PlantParams::default();
+        params.l_max = 1.0;
+        params.beta = 1.0;
+        let plant = grow_with(params, 80);
+        let bound = 1.0 + plant.params.g2.abs() + 1e-3;
+        for s in plant.skeleton() {
+            let len = (s.b - s.a).length();
+            assert!(len <= bound, "segment length {len} exceeds ℓmax+|g2| ({bound})");
+        }
     }
 }

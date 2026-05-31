@@ -256,6 +256,25 @@ mod tests {
     }
 
     #[test]
+    fn climate_adaptation_is_a_gaussian_niche_peaking_at_the_optimum() {
+        // Eq. 11: o(T,P) is a product of temperature/precipitation Gaussians,
+        // so it is exactly 1 at the species optimum and decays monotonically as
+        // the climate departs from it in either axis.
+        for sp in library() {
+            let peak = sp.adaptation(sp.temp_opt, sp.precip_opt);
+            assert!((peak - 1.0).abs() < 1e-5, "{} peak adaptation {peak} != 1", sp.name);
+            // One sigma off in temperature ⇒ exp(-0.5) ≈ 0.607 of the peak.
+            let one_sigma = sp.adaptation(sp.temp_opt + sp.temp_sigma, sp.precip_opt);
+            assert!((one_sigma - (-0.5f32).exp()).abs() < 1e-4, "{} 1σ temp", sp.name);
+            // Monotone decay: further from the optimum is never higher.
+            let near = sp.adaptation(sp.temp_opt + 3.0, sp.precip_opt + 5.0);
+            let far = sp.adaptation(sp.temp_opt + 12.0, sp.precip_opt + 40.0);
+            assert!(far < near, "{}: adaptation should fall off with distance", sp.name);
+            assert!((0.0..=1.0).contains(&far), "{} adaptation out of [0,1]", sp.name);
+        }
+    }
+
+    #[test]
     fn trunk_radii_and_slenderness_stay_plausible() {
         // Guards the phi / v_max scale: trunks neither pencil-thin nor stumpy,
         // proportions in a believable band.
