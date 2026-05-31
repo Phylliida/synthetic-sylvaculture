@@ -189,6 +189,39 @@ fn run_stats() {
         println!("  tall plants {}  mean apex_lean {:.2}  max {:.2}", leans.len(), mean, max);
     }
 
+    println!("\nforest mesh size (CPU build, no GL) — boreal vs temperate, 170 steps:");
+    for (label, clim) in [
+        ("boreal", Climate { temp: 5.0, precip: 85.0 }),
+        ("temperate", Climate { temp: 12.0, precip: 130.0 }),
+    ] {
+        let mut eco = Ecosystem::new(40, 14.0, 7, clim);
+        for _ in 0..170 {
+            eco.step(1.0);
+        }
+        let trunk = mesh::build_forest_mesh(&eco.trunk_batches(), 6);
+        let foliage = mesh::build_forest_foliage(&eco.foliage_batches(), 0.4, 5);
+        let tv = match &trunk.positions {
+            three_d::Positions::F32(v) => v.len(),
+            _ => 0,
+        };
+        let fv = match &foliage.positions {
+            three_d::Positions::F32(v) => v.len(),
+            _ => 0,
+        };
+        let nan = match &trunk.positions {
+            three_d::Positions::F32(v) => v.iter().any(|p| !p.x.is_finite() || !p.y.is_finite() || !p.z.is_finite()),
+            _ => false,
+        };
+        println!(
+            "  {label:<10} plants {:>3}  modules {:>5}  trunk_verts {:>7}  foliage_verts {:>7}  nan:{}",
+            eco.plant_count(),
+            eco.total_modules(),
+            tv,
+            fv,
+            nan
+        );
+    }
+
     println!("\nspecies presets (100 steps each):");
     for sp in species::library() {
         let mut plant = make_plant(sp.params);
@@ -374,6 +407,11 @@ fn run_shot() {
         eco.plant_count(),
         steps
     );
+    // The image is saved; exit before the winit/Wayland context teardown, which
+    // segfaults on shutdown (proxies still attached) and otherwise looks like a
+    // failed render even though the PNG is fine.
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+    std::process::exit(0);
 }
 
 /// Ecosystem viewer: a stand of mixed-species plants growing together on flat
