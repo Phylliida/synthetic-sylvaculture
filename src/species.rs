@@ -8,6 +8,12 @@
 
 use crate::plant::PlantParams;
 
+// The ecosystem now evolves genomes (see `genome.rs`); these presets are kept
+// only as named archetypes for the single-plant viewer / `--tree` / `--stats`
+// morphology readout, which use just `name`/`params`/colours. The climate-niche
+// and reproductive fields below are retained as documentation of each
+// archetype's intended habitat but are no longer read by the simulation.
+#[allow(dead_code)]
 pub struct Species {
     pub name: &'static str,
     pub params: PlantParams,
@@ -29,7 +35,9 @@ pub struct Species {
 
 impl Species {
     /// Climate adaptation o ∈ [0,1] (Eq. 11): product of temperature and
-    /// precipitation Gaussians centred on the species optima.
+    /// precipitation Gaussians centred on the species optima. (Unused now that
+    /// the ecosystem evolves genomes with no hardcoded niche; kept for reference.)
+    #[allow(dead_code)]
     pub fn adaptation(&self, temp: f32, precip: f32) -> f32 {
         let dt = (temp - self.temp_opt) / self.temp_sigma;
         let dp = (precip - self.precip_opt) / self.precip_sigma;

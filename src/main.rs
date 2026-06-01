@@ -9,6 +9,7 @@
 //!            ↑/↓ plant growth rate · mouse orbit/zoom.
 
 mod ecosystem;
+mod genome;
 mod mesh;
 mod overlay;
 mod plant;
@@ -85,7 +86,7 @@ fn run_stats() {
         }
         let mut h = eco.plant_heights();
         h.sort_by(f32::total_cmp);
-        let med = h[h.len() / 2];
+        let med = if h.is_empty() { 0.0 } else { h[h.len() / 2] };
         println!(
             "  shadow {:<3}  plants {:>3}  total modules {:>5}  median height {:.1}  tallest {:.1}",
             if shadow { "on" } else { "off" },
@@ -96,54 +97,54 @@ fn run_stats() {
         );
     }
 
-    let names: Vec<&str> = Ecosystem::new(0, 1.0, 0, temperate)
-        .species
-        .iter()
-        .map(|s| s.name)
-        .collect();
+    // Key evolved traits to display (index into Genome::traits()).
+    let key = |m: &[f32; 17]| {
+        format!(
+            "env_h {:>4.1}  env_r {:>3.1}  v_root {:>5.1}  shade {:.2}  flower {:>4.1}  seed_f {:.3}  life {:>4.0}",
+            m[11], m[12], m[4], m[9], m[13], m[15], m[16]
+        )
+    };
 
-    println!("\necosystem: succession (temperate, species counts over time):");
+    println!("\necosystem: EVOLUTION (temperate, mean genome over time from random founders):");
     {
         let mut eco = Ecosystem::new(30, 13.0, 4, temperate);
-        for s in 1..=360 {
+        for s in 1..=500 {
             eco.step(1.0);
-            if [60, 150, 260, 360].contains(&s) {
-                let counts = eco.species_counts();
-                let comp: Vec<String> = counts
-                    .iter()
-                    .zip(&names)
-                    .filter(|(c, _)| **c > 0)
-                    .map(|(c, n)| format!("{n}:{c}"))
-                    .collect();
-                println!("  step {s:>3}  plants {:>3}  [{}]", eco.plant_count(), comp.join(", "));
+            if [1, 150, 320, 500].contains(&s) {
+                if let Some(m) = eco.mean_traits() {
+                    println!(
+                        "  step {s:>3}  established {:>3}/{:>3}  {}",
+                        eco.established_count(),
+                        eco.plant_count(),
+                        key(&m)
+                    );
+                }
             }
         }
     }
 
-    println!("\necosystem: biome composition across climates (180 steps each):");
+    println!("\necosystem: SPECIALIZATION across climates (evolved mean genome, 450 steps each):");
+    println!("  (same random founders + seed; only the climate differs ⇒ divergence is selection)");
     for clim in [
-        Climate { temp: -3.0, precip: 60.0 },
-        Climate { temp: 10.0, precip: 90.0 },
-        Climate { temp: 24.0, precip: 200.0 },
+        Climate { temp: -3.0, precip: 40.0 },
+        Climate { temp: 5.0, precip: 90.0 },
+        Climate { temp: 12.0, precip: 110.0 },
+        Climate { temp: 26.0, precip: 300.0 },
     ] {
         let mut eco = Ecosystem::new(36, 13.0, 9, clim);
-        for _ in 0..180 {
+        for _ in 0..450 {
             eco.step(1.0);
         }
-        let counts = eco.species_counts();
-        let dom = counts
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, c)| **c)
-            .map(|(i, _)| names[i])
-            .unwrap_or("none");
+        let traits = eco.mean_traits().map(|m| key(&m)).unwrap_or_else(|| "(nothing established — too harsh)".into());
         println!(
-            "  T={:>4.0}°C P={:>3.0}cm  {:<28}  plants {:>3}  dominant: {}",
+            "  T={:>4.0}°C P={:>3.0}cm (prod {:.2})  {:<26}  established {:>3}/{:>3}\n      {}",
             clim.temp,
             clim.precip,
+            clim.productivity(),
             biome_name(clim.temp, clim.precip),
+            eco.established_count(),
             eco.plant_count(),
-            dom
+            traits
         );
     }
 
@@ -287,13 +288,26 @@ fn run_stats() {
     println!("  Yoda's −3/2 law: log(mean biomass) vs log(density) has slope ≈ −1.5 as the");
     println!("  stand thins. (cohort competes for light; suppressed plants are culled)");
     {
-        let mut eco = Ecosystem::new(170, 12.0, 5, Climate { temp: 12.0, precip: 110.0 });
+        // A monoculture (clones of one representative genome) — Yoda's law is a
+        // single-species property; the mixed evolving stand is a different thing.
+        let rep = genome::Genome {
+            lambda: 0.52, determinacy: 0.5, alpha: 2.2, gp: 1.0, v_root_max: 140.0,
+            g2: -0.15, tropism_up: 0.30, xi: 0.25, phi: 0.05, shade_tolerance: 0.30,
+            shed_ratio: 0.35, envelope_height: 18.0, envelope_radius: 4.0,
+            flowering_age: 50.0, seed_radius: 8.0, seed_freq: 0.06, lifespan: 120.0,
+        };
+        let mut eco = Ecosystem::monoculture(220, 14.0, 5, Climate { temp: 12.0, precip: 110.0 }, rep);
         eco.seeding_enabled = false;
         let area = 4.0 * eco.size * eco.size;
         let mut pts: Vec<(f32, f32)> = Vec::new();
+        let mut last_n = usize::MAX;
         for s in 1..=320 {
             eco.step(1.0);
-            if s % 40 == 0 && eco.plant_count() > 2 {
+            // Sample the ACTIVE thinning trajectory: a point only when the cohort
+            // has actually thinned since the last sample (the frozen tail, once a
+            // few well-spaced survivors remain, would otherwise flatten the fit).
+            if s % 10 == 0 && eco.plant_count() > 4 && eco.plant_count() < last_n {
+                last_n = eco.plant_count();
                 let n = eco.plant_count() as f32;
                 let mean_bio = eco.plants.iter().map(|p| p.biomass()).sum::<f32>() / n;
                 let density = n / area;

@@ -4,8 +4,8 @@
 //! each an independent growth simulation, rendered as one combined mesh.
 //! Global shadowing, seeding, and climate arrive in later stages.
 
-use crate::plant::{colonize, pack, BudQuery, FxIdMap, FxMap, ModuleId, Occ, Plant, Segment};
-use crate::species::{self, Species};
+use crate::plant::{colonize, pack, BudQuery, FxIdMap, FxMap, ModuleId, Occ, Plant, PlantParams, Segment};
+use crate::genome::Genome;
 
 /// Shared marker field: vertical extent and density (markers per unit volume).
 const MAX_FIELD_HEIGHT: f32 = 34.0;
@@ -15,11 +15,27 @@ const OCC_R: f32 = 1.1;
 const PER_R: f32 = 2.8;
 const PER_COS: f32 = 0.3;
 /// Carbon-starvation mortality: a plant older than CARBON_ESTABLISH steps dies
-/// once its smoothed carbon balance (mean foliage light) falls below
-/// CARBON_THRESHOLD — too shaded to pay its upkeep. Shade tolerance floors a
-/// species' light, so tolerant climax species survive shade that kills pioneers.
+/// once its smoothed crown-light (carbon income proxy) falls below the survival
+/// bar `maintenance / P` (see `survival_bar`). Maintenance is an INTRINSIC cost
+/// of crown size (wood respiration) plus a base — so a big crown only breaks
+/// even where productivity P is high, regardless of crowding. This is what makes
+/// climate select morphology robustly (not just under competition).
 const CARBON_ESTABLISH: f32 = 30.0;
-const CARBON_THRESHOLD: f32 = 0.18;
+/// Baseline upkeep light (even a tiny plant must capture this × 1/P).
+const MAINT_BASE: f32 = 0.06;
+/// Extra upkeep a full-size crown demands (∝ crown volume) — the size cost.
+const MAINT_SIZE: f32 = 0.22;
+/// Crown volume that counts as "full size" for normalizing the size cost.
+const MAINT_FULL_VOL: f32 = 2200.0;
+/// Seed rain: establishment attempts scattered across the whole floor each step
+/// (on top of local seeding), so gaps are colonized the moment they open and the
+/// floor is always carpeted with seedlings trying to take hold. Bounded by the
+/// plant cap, so a closed canopy leaves few openings and a sparse stand many.
+const SEED_RAIN: usize = 10;
+/// Fraction of seed-rain that is a fresh random genome (immigration): propagule
+/// pressure + diversity, and lets a bare plot keep attempting to recolonize.
+/// Small, so it doesn't dilute local adaptation (the misfits mostly die young).
+const IMMIGRANT_FRAC: f32 = 0.1;
 /// Plant-parallel grow: the per-plant growth cycles are independent (each reads
 /// its own qg/space and the read-only shared centres/grid, mutates only itself),
 /// so they run across this many contiguous plant chunks on scoped threads.
@@ -153,10 +169,11 @@ impl ShadowGrid {
 }
 
 pub struct Ecosystem {
-    pub species: Vec<Species>,
     pub plants: Vec<Plant>,
-    /// Species index of each plant (parallel to `plants`).
-    pub species_idx: Vec<usize>,
+    /// Genome of each plant (parallel to `plants`). The ecosystem evolves: there
+    /// is no fixed species list — founders get random genomes and seeds inherit
+    /// the parent's genome with mutation, so morphology is sculpted by selection.
+    pub genomes: Vec<Genome>,
     /// Half-extent of the square ground.
     pub size: f32,
     pub age: f32,
@@ -165,8 +182,12 @@ pub struct Ecosystem {
     /// Seeding/recruitment on/off. Off = a fixed even-aged cohort (used by the
     /// self-thinning validation, where new recruits would muddle the law).
     pub seeding_enabled: bool,
-    /// Climate (Sec. 6.4): drives per-species adaptation o (Eq. 11).
+    /// Climate (Sec. 6.4). Couples to growth ONLY via a single physical
+    /// productivity scalar `P` (`productivity()`) — no per-genome niche. Biome
+    /// specialization is emergent: different morphologies win at different `P`.
     pub climate: Climate,
+    /// Per-trait mutation step (fraction of each trait's span) for seeds.
+    pub mutation_rate: f32,
     /// Population cap (for interactive performance).
     pub max_plants: usize,
     /// Shared free-space marker field for space colonization (Pałubicki §4.1):
@@ -182,6 +203,23 @@ pub struct Ecosystem {
 pub struct Climate {
     pub temp: f32,
     pub precip: f32,
+}
+
+impl Climate {
+    /// Physical productivity `P ∈ [0,1]`: how much carbon this environment can
+    /// make. Rises monotonically and saturates with both warmth and water (this
+    /// is the Whittaker net-primary-productivity gradient). NOT a per-genome
+    /// niche and NOT peaked at any optimum — every plant feels the same `P`. It
+    /// is the ONLY way climate touches the simulation: it scales growth
+    /// (`v_root_max *= P`) and the carbon-starvation survival bar
+    /// (`health < THRESHOLD / P`). Specialization to a biome therefore emerges
+    /// purely from which morphologies break even / out-compete at this `P`.
+    pub fn productivity(&self) -> f32 {
+        // Logistic in each axis: ~0 when cold/dry, ~1 when warm/wet.
+        let warmth = 1.0 / (1.0 + (-(self.temp - 6.0) / 5.0).exp());
+        let water = 1.0 / (1.0 + (-(self.precip - 65.0) / 28.0).exp());
+        (warmth * water).clamp(0.0, 1.0)
+    }
 }
 
 /// Coarse Whittaker-style biome label for a climate point (Fig. 2).
@@ -209,17 +247,16 @@ pub fn biome_name(t: f32, p: f32) -> &'static str {
 
 impl Ecosystem {
     pub fn new(n: usize, size: f32, seed: u64, climate: Climate) -> Self {
-        let species = species::library();
         let rng = ChaCha8Rng::seed_from_u64(seed);
         let mut eco = Ecosystem {
-            species,
             plants: Vec::new(),
-            species_idx: Vec::new(),
+            genomes: Vec::new(),
             size,
             age: 0.0,
             shadow_enabled: true,
             seeding_enabled: true,
             climate,
+            mutation_rate: 0.08,
             max_plants: 170,
             markers: Vec::new(),
             rng,
@@ -236,49 +273,48 @@ impl Ecosystem {
             eco.markers.push(vec3(x, y, z));
         }
 
-        // Initial even-aged cohort (age variety later emerges from seeding).
+        // Founders: a uniform-random genome each (a broad initial gene pool).
+        // Specialization to the climate emerges from selection on these, not
+        // from any climate-aware seeding.
         for _ in 0..n {
             let x = eco.rng.gen_range(-size..size);
             let z = eco.rng.gen_range(-size..size);
-            let si = eco.pick_species_for_climate();
-            let plant = eco.make_plant_of(si, vec3(x, 0.0, z));
+            let g = Genome::random(&mut eco.rng);
+            let plant = eco.make_plant_from_genome(&g, vec3(x, 0.0, z));
             eco.plants.push(plant);
-            eco.species_idx.push(si);
+            eco.genomes.push(g);
         }
         eco
     }
 
-    /// Build a plant of species `si` at `pos`, with its growth potential scaled
-    /// by climate adaptation o (Eq. 11) — poorly-adapted species barely grow.
-    /// Its private marker dome is cleared: in the ecosystem it grows in the
-    /// shared field instead.
-    fn make_plant_of(&self, si: usize, pos: Vec3) -> Plant {
-        let sp = &self.species[si];
-        let o = sp.adaptation(self.climate.temp, self.climate.precip);
-        let mut params = sp.params.clone();
-        params.v_root_max *= o; // total growth potential scales with adaptation
+    /// A monospecific even-aged cohort: `n` clones of one genome, scattered on
+    /// the plot. Used for the self-thinning (Yoda −3/2) validation, which is a
+    /// property of a single species competing with itself — not the mixed,
+    /// evolving stand `new` builds.
+    pub fn monoculture(n: usize, size: f32, seed: u64, climate: Climate, g: Genome) -> Self {
+        let mut eco = Ecosystem::new(0, size, seed, climate);
+        for _ in 0..n {
+            let x = eco.rng.gen_range(-size..size);
+            let z = eco.rng.gen_range(-size..size);
+            let plant = eco.make_plant_from_genome(&g, vec3(x, 0.0, z));
+            eco.plants.push(plant);
+            eco.genomes.push(g.clone());
+        }
+        eco
+    }
+
+    /// Build the plant a genome expresses at `pos`. Climate enters here as the
+    /// single physical productivity scalar: `v_root_max *= P`, so the *same*
+    /// genome grows large in a rich climate and stays small in a poor one (no
+    /// per-genome niche). Its private marker dome is cleared — in the ecosystem
+    /// it grows in the shared field instead.
+    fn make_plant_from_genome(&self, g: &Genome, pos: Vec3) -> Plant {
+        let p = self.climate.productivity();
+        let mut params = g.to_params();
+        params.v_root_max *= p.max(0.12); // growth budget scales with productivity
         let mut plant = Plant::new(params, pos);
         plant.clear_markers();
         plant
-    }
-
-    /// Pick a species with probability proportional to its climate adaptation,
-    /// so a stand starts dominated by species suited to the environment.
-    fn pick_species_for_climate(&mut self) -> usize {
-        let weights: Vec<f32> = self
-            .species
-            .iter()
-            .map(|s| s.adaptation(self.climate.temp, self.climate.precip) + 0.01)
-            .collect();
-        let total: f32 = weights.iter().sum();
-        let mut r = self.rng.gen::<f32>() * total;
-        for (i, w) in weights.iter().enumerate() {
-            r -= w;
-            if r <= 0.0 {
-                return i;
-            }
-        }
-        weights.len() - 1
     }
 
     pub fn step(&mut self, dt: f32) {
@@ -397,18 +433,42 @@ impl Ecosystem {
         t
     }
 
+    /// The minimum smoothed crown-light a plant of these traits must hold to pay
+    /// its upkeep here. Income is `P · health`; maintenance = base + a size cost
+    /// (∝ crown volume, an intrinsic wood-respiration cost), reduced by shade
+    /// tolerance (cheap, durable leaves). Survive iff `P · health ≥ maintenance`,
+    /// i.e. `health ≥ maintenance / P`. Because the size cost is intrinsic (not
+    /// competition-driven), a big crown only breaks even at high productivity —
+    /// so climate selects size robustly, even in a sparse stand.
+    fn survival_bar(&self, params: &PlantParams) -> f32 {
+        let p = self.climate.productivity().max(0.05);
+        let vol = std::f32::consts::PI
+            * params.envelope_radius
+            * params.envelope_radius
+            * params.envelope_height;
+        let size = (vol / MAINT_FULL_VOL).clamp(0.0, 1.1);
+        let maint = (MAINT_BASE + MAINT_SIZE * size) * (1.0 - 0.5 * params.shade_tolerance);
+        (maint / p).clamp(0.02, 0.97)
+    }
+
     /// Remove plants that die, opening gaps (Sec. 4.2): old age (senescence), or
-    /// **carbon starvation** — an established plant whose smoothed carbon balance
-    /// (resource captured per metamer) has fallen below what it needs to pay its
-    /// upkeep. The latter is competition-driven death: overtopped, shaded trees
-    /// can no longer sustain their wood and die, sharpening succession.
+    /// **carbon starvation** — an established plant whose smoothed crown-light has
+    /// fallen below its `survival_bar` (too small a crown to pay upkeep at this
+    /// productivity, or overtopped). Death opens space and sharpens succession.
     fn cull_dead(&mut self) {
+        // Carbon balance with climate: survive only if income (light) covers
+        // upkeep, i.e. `health · P ≥ cost`, so the survival light bar is
+        // `CARBON_THRESHOLD / P`. Rich climate → low bar → tall dense canopy
+        // viable; poor climate → high bar → only small, well-lit forms break
+        // even (sparse scrub). This — not any niche — makes climate select
+        // morphology.
         let dead: Vec<bool> = self
             .plants
             .iter()
-            .map(|p| {
-                let senesced = p.age >= 1.9 * p.params.p_max;
-                let starved = p.age > CARBON_ESTABLISH && p.health() < CARBON_THRESHOLD;
+            .map(|pl| {
+                let bar = self.survival_bar(&pl.params);
+                let senesced = pl.age >= 1.9 * pl.params.p_max;
+                let starved = pl.age > CARBON_ESTABLISH && pl.health() < bar;
                 senesced || starved
             })
             .collect();
@@ -419,53 +479,118 @@ impl Ecosystem {
             keep
         });
         let mut j = 0;
-        self.species_idx.retain(|_| {
+        self.genomes.retain(|_| {
             let keep = !dead[j];
             j += 1;
             keep
         });
     }
 
-    /// Flowering plants scatter seeds of their own species nearby (Sec. 6.3);
-    /// seeding rate scales with climate adaptation, and offspring inherit the
-    /// climate-scaled growth potential, so well-adapted species spread.
+    /// Mature, thriving plants scatter seeds nearby (Sec. 6.3); each seed
+    /// **inherits the parent genome with a small mutation** (heritable variation
+    /// — the ingredient that lets selection accumulate). There is no climate
+    /// niche: reproduction just needs a plant past its (genome-set) flowering age
+    /// that is paying its upkeep (`health ≥ CARBON_THRESHOLD`), so only forms
+    /// that actually thrive in this climate spread their genes.
     fn seed(&mut self, dt: f32) {
         if self.plants.len() >= self.max_plants {
             return;
         }
-        let (t, p) = (self.climate.temp, self.climate.precip);
-        let mut newborns: Vec<(usize, Vec3)> = Vec::new();
-        for (plant, &si) in self.plants.iter().zip(&self.species_idx) {
+        // Snapshot the parents first (releases the &self borrow before rng use).
+        // `bar` is each parent's own survival bar — only a plant comfortably
+        // paying its upkeep (health above bar) flowers, so reproductive success
+        // tracks how well the genome actually fits this climate.
+        let parents: Vec<(f32, f32, f32, Genome, Vec3)> = self
+            .plants
+            .iter()
+            .zip(&self.genomes)
+            .map(|(pl, g)| (pl.age, pl.health(), self.survival_bar(&pl.params), g.clone(), pl.origin))
+            .collect();
+        let mut newborns: Vec<(Genome, Vec3)> = Vec::new();
+        for (age, health, bar, g, origin) in &parents {
             if self.plants.len() + newborns.len() >= self.max_plants {
                 break;
             }
-            let sp = &self.species[si];
-            if plant.age < sp.flowering_age {
+            if *age < g.flowering_age || *health < *bar {
                 continue;
             }
-            let o = sp.adaptation(t, p);
-            if self.rng.gen::<f32>() < sp.seed_freq * o * dt {
+            if self.rng.gen::<f32>() < g.seed_freq * dt {
                 let ang = self.rng.gen::<f32>() * std::f32::consts::TAU;
-                let r = sp.seed_radius * self.rng.gen::<f32>().sqrt();
-                let x = (plant.origin.x + ang.cos() * r).clamp(-self.size, self.size);
-                let z = (plant.origin.z + ang.sin() * r).clamp(-self.size, self.size);
-                newborns.push((si, vec3(x, 0.0, z)));
+                let r = g.seed_radius * self.rng.gen::<f32>().sqrt();
+                let x = (origin.x + ang.cos() * r).clamp(-self.size, self.size);
+                let z = (origin.z + ang.sin() * r).clamp(-self.size, self.size);
+                let child = g.mutated(self.mutation_rate, &mut self.rng);
+                newborns.push((child, vec3(x, 0.0, z)));
             }
         }
-        for (si, pos) in newborns {
-            let plant = self.make_plant_of(si, pos);
+        for (g, pos) in newborns {
+            let plant = self.make_plant_from_genome(&g, pos);
             self.plants.push(plant);
-            self.species_idx.push(si);
+            self.genomes.push(g);
+        }
+
+        // Seed rain: keep the floor carpeted with establishment attempts so a gap
+        // is colonized the moment a plant dies. Rain genomes come from the proven
+        // reproductive pool (mature, thriving plants) + a small fresh-random
+        // immigrant fraction. Most land in shade and starve young; the ones in
+        // gaps take hold — recruitment by competition, not a schedule.
+        let pool: Vec<Genome> = parents
+            .iter()
+            .filter(|(age, health, bar, g, _)| *age >= g.flowering_age && *health >= *bar)
+            .map(|(_, _, _, g, _)| g.clone())
+            .collect();
+        let mut rained = 0;
+        while self.plants.len() < self.max_plants && rained < SEED_RAIN {
+            rained += 1;
+            let g = if !pool.is_empty() && self.rng.gen::<f32>() > IMMIGRANT_FRAC {
+                let i = self.rng.gen_range(0..pool.len());
+                pool[i].mutated(self.mutation_rate, &mut self.rng)
+            } else {
+                Genome::random(&mut self.rng)
+            };
+            let x = self.rng.gen_range(-self.size..self.size);
+            let z = self.rng.gen_range(-self.size..self.size);
+            let plant = self.make_plant_from_genome(&g, vec3(x, 0.0, z));
+            self.plants.push(plant);
+            self.genomes.push(g);
         }
     }
 
-    /// Counts of each species currently present (parallel to the library).
-    pub fn species_counts(&self) -> Vec<usize> {
-        let mut counts = vec![0; self.species.len()];
-        for &si in &self.species_idx {
-            counts[si] += 1;
+    /// Number of *established* plants — those past the seedling gauntlet
+    /// (`age > CARBON_ESTABLISH`). The seed rain keeps the floor full of young
+    /// seedlings, so the total `plant_count` is mostly transient carpet; the
+    /// established count is the standing adapted community.
+    pub fn established_count(&self) -> usize {
+        self.plants.iter().filter(|p| p.age > CARBON_ESTABLISH).count()
+    }
+
+    /// Mean of each genome trait over the **established** plants (field order;
+    /// see `Genome::NAMES`). Established only — averaging the seedling carpet
+    /// (≈ the seed-rain source) would mask what selection actually favoured.
+    /// `None` when nothing has established (e.g. a climate too harsh to survive).
+    pub fn mean_traits(&self) -> Option<[f32; 17]> {
+        let est: Vec<&Genome> = self
+            .plants
+            .iter()
+            .zip(&self.genomes)
+            .filter(|(p, _)| p.age > CARBON_ESTABLISH)
+            .map(|(_, g)| g)
+            .collect();
+        if est.is_empty() {
+            return None;
         }
-        counts
+        let mut acc = [0.0f32; 17];
+        for g in &est {
+            let t = g.traits();
+            for k in 0..17 {
+                acc[k] += t[k];
+            }
+        }
+        let n = est.len() as f32;
+        for v in &mut acc {
+            *v /= n;
+        }
+        Some(acc)
     }
 
     pub fn plant_count(&self) -> usize {
@@ -498,7 +623,7 @@ impl Ecosystem {
     /// per-plant `skeleton()` calls are independent, so gather them in parallel
     /// (order preserved: chunks are contiguous and flattened in order).
     pub fn trunk_batches(&self) -> Vec<(Vec<Segment>, [u8; 3])> {
-        let (plants, sidx, species) = (&self.plants, &self.species_idx, &self.species);
+        let (plants, genomes) = (&self.plants, &self.genomes);
         let parts: Vec<Vec<(Vec<Segment>, [u8; 3])>> = std::thread::scope(|scope| {
             let handles: Vec<_> = self
                 .plant_chunks()
@@ -506,10 +631,7 @@ impl Ecosystem {
                 .map(|(s, e)| {
                     scope.spawn(move || {
                         (s..e)
-                            .map(|i| {
-                                let c = species[sidx[i]].bark_rgb;
-                                (plants[i].skeleton(), [c.0, c.1, c.2])
-                            })
+                            .map(|i| (plants[i].skeleton(), genomes[i].bark_rgb()))
                             .collect::<Vec<_>>()
                     })
                 })
@@ -522,7 +644,7 @@ impl Ecosystem {
     /// Per-plant leaf points tinted with that plant's leaf colour (parallel
     /// gather like `trunk_batches`).
     pub fn foliage_batches(&self) -> Vec<(Vec<(Vec3, Vec3)>, [u8; 3])> {
-        let (plants, sidx, species) = (&self.plants, &self.species_idx, &self.species);
+        let (plants, genomes) = (&self.plants, &self.genomes);
         let parts: Vec<Vec<(Vec<(Vec3, Vec3)>, [u8; 3])>> = std::thread::scope(|scope| {
             let handles: Vec<_> = self
                 .plant_chunks()
@@ -530,10 +652,7 @@ impl Ecosystem {
                 .map(|(s, e)| {
                     scope.spawn(move || {
                         (s..e)
-                            .map(|i| {
-                                let c = species[sidx[i]].leaf_rgb;
-                                (plants[i].leaves(), [c.0, c.1, c.2])
-                            })
+                            .map(|i| (plants[i].leaves(), genomes[i].leaf_rgb()))
                             .collect::<Vec<_>>()
                     })
                 })
@@ -566,28 +685,46 @@ mod tests {
     }
 
     #[test]
-    fn warm_climate_favors_thermophile() {
-        // Oak (idx 3, temp_opt 15°C / precip_opt 115cm) must be commoner in a
-        // climate near its optimum than in a cold one (Eq. 11 scaling growth +
-        // seeding). NB: compare against oak's *favourable* temperate range, not a
-        // hotter tropical climate — there it is legitimately out-competed (and
-        // shaded out) by the tropical broadleaf, which is emergent, not a bug.
-        let oak = 3;
-        let cold = grown(Climate { temp: -3.0, precip: 60.0 }, 220).species_counts()[oak];
-        let warm = grown(Climate { temp: 15.0, precip: 115.0 }, 220).species_counts()[oak];
-        assert!(warm > cold, "oak should be commoner near its optimum: warm {warm} vs cold {cold}");
+    fn climate_selects_taller_crowns_where_productive() {
+        // The headline emergent property: there is NO hardcoded climate niche —
+        // a productive (warm, wet) climate must evolve a taller mean crown than a
+        // poor (cold, dry) one. Specialization is pure selection on the carbon
+        // tradeoff (crown light self-shades, so a big crown only pays its way at
+        // high productivity). The established cohort is small ⇒ per-run noisy, so
+        // average the evolved mean crown height (env_h) over several seeds.
+        let mean_env_h = |climate: Climate| -> f32 {
+            let seeds = [1u64, 2, 3, 4];
+            let hs: Vec<f32> = seeds
+                .iter()
+                .filter_map(|&sd| {
+                    let mut eco = Ecosystem::new(36, 13.0, sd, climate);
+                    for _ in 0..340 {
+                        eco.step(1.0);
+                    }
+                    eco.mean_traits().map(|m| m[11]) // env_h
+                })
+                .collect();
+            hs.iter().sum::<f32>() / hs.len().max(1) as f32
+        };
+        let poor = mean_env_h(Climate { temp: 5.0, precip: 80.0 });
+        let rich = mean_env_h(Climate { temp: 24.0, precip: 280.0 });
+        assert!(
+            rich > poor + 2.0,
+            "productive climate should evolve taller crowns (avg over seeds): rich env_h {rich:.1} vs poor {poor:.1}"
+        );
     }
 
     #[test]
     fn forest_canopy_stays_upright() {
         // Regression for the banana/loop bug: in a grown stand the tall plants
         // must rise roughly over their bases, not arc over. apex_lean is the
-        // highest node's horizontal offset / height.
-        let mut eco = Ecosystem::new(40, 14.0, 7, Climate { temp: 5.0, precip: 80.0 });
+        // highest node's horizontal offset / height. (Productive climate so the
+        // stand actually grows tall plants to check.)
+        let mut eco = Ecosystem::new(40, 14.0, 7, Climate { temp: 22.0, precip: 220.0 });
         for _ in 0..160 {
             eco.step(1.0);
         }
-        let leans: Vec<f32> = eco
+        let mut leans: Vec<f32> = eco
             .plants
             .iter()
             .filter_map(|p| {
@@ -596,8 +733,12 @@ mod tests {
             })
             .collect();
         assert!(!leans.is_empty(), "expected some tall plants");
-        let mean = leans.iter().sum::<f32>() / leans.len() as f32;
-        assert!(mean < 0.25, "forest canopy is arcing over: mean apex_lean {mean:.2}");
+        // Median (robust to the few gnarly high-ξ / low-tropism genomes the
+        // evolving population naturally contains): the banana/loop bug arced
+        // *every* tall plant right over (lean ≫ 0.5); a healthy stand sits low.
+        leans.sort_by(f32::total_cmp);
+        let median = leans[leans.len() / 2];
+        assert!(median < 0.4, "forest canopy is arcing over: median apex_lean {median:.2}");
     }
 
     #[test]

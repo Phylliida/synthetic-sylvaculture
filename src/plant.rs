@@ -221,11 +221,15 @@ pub struct Plant {
     pub origin: Vec3,
     /// Live free-space markers (Pałubicki §4.1); consumed as the tree grows.
     markers: Vec<Vec3>,
-    /// Smoothed carbon balance: an EMA of resource captured per metamer. When it
-    /// stays low the plant can't pay its upkeep and is culled (carbon-starvation
-    /// mortality). Starts healthy; the EMA prevents a transient shading from
-    /// killing an established tree.
+    /// Smoothed carbon balance: an EMA of mean *raw* light captured per metamer.
+    /// When it stays low the plant can't pay its upkeep and is culled
+    /// (carbon-starvation mortality). Raw (not floored by shade tolerance) so the
+    /// carbon signal reflects light actually captured — tolerance instead lowers
+    /// the survival *bar* and costs growth (see `cull_dead` / the vigor penalty).
+    /// Starts healthy; the EMA prevents a transient shading from killing a tree.
     health: f32,
+    /// Mean raw light `g` over live metamers this step (feeds `health`).
+    mean_g: f32,
 }
 
 impl Plant {
@@ -268,6 +272,7 @@ impl Plant {
             origin,
             markers,
             health: 1.0,
+            mean_g: 1.0,
         }
     }
 
@@ -321,14 +326,11 @@ impl Plant {
         self.environment(qg, space);
         self.light_pass();
         self.vigor_pass();
-        // Carbon balance: the mean light the foliage receives, smoothed. This is
-        // size-independent (a mean over metamers) and floored by shade tolerance
-        // (light_level ≥ s_tol), so a shade-tolerant species survives in shade
-        // while an overtopped intolerant one starves — the engine of succession.
-        let ids = self.alive_ids();
-        let mean_light =
-            ids.iter().map(|&id| self.node(id).light_level).sum::<f32>() / ids.len().max(1) as f32;
-        self.health = self.health * 0.9 + mean_light * 0.1;
+        // Carbon balance: the mean RAW light the foliage receives, smoothed
+        // (size-independent). Tolerance does not inflate this — it instead lowers
+        // the survival bar (in `cull_dead`) and costs growth (the vigor penalty),
+        // so the engine of succession is a genuine tradeoff, not free health.
+        self.health = self.health * 0.9 + self.mean_g * 0.1;
         self.grow();
         self.shed();
         self.recompute_diameters();
@@ -361,11 +363,26 @@ impl Plant {
         // Light g: supplied global shadow, else self-shadow (standalone plant).
         let self_g = if qg.is_none() { Some(self.self_shadow()) } else { None };
 
+        let mut tip_g = 0.0f32; // raw light over the crown tips (the foliage)
+        let mut tip_n = 0u32;
         for &id in &ids {
             let g = qg
                 .and_then(|map| map.get(&id).copied())
                 .or_else(|| self_g.as_ref().and_then(|map| map.get(&id).copied()))
                 .unwrap_or(1.0);
+            // Carbon comes from the foliage — the crown TIPS (childless metamers).
+            // Their mean light naturally DECLINES as a crown grows larger/denser
+            // (self-shading), so a big crown only pays its way where productivity
+            // is high: this size↔light diminishing return is what lets climate
+            // select morphology. Tolerance does not inflate it (raw g) — it only
+            // lowers the survival bar and costs growth.
+            if self.node(id).children.is_empty() {
+                tip_g += g;
+                tip_n += 1;
+            }
+            // light_level (floored by tolerance) drives GROWTH and shedding — a
+            // tolerant plant keeps extending / holding branches in shade — but the
+            // carbon balance below uses raw g, so tolerance is not free survival.
             let light = stol + (1.0 - stol) * g;
             self.node_mut(id).light_level = light;
             match space_map.get(&id) {
@@ -379,6 +396,7 @@ impl Plant {
                 }
             }
         }
+        self.mean_g = if tip_n > 0 { tip_g / tip_n as f32 } else { 0.0 };
     }
 
     /// Active-bud tips (module id, position, facing direction) — what the
@@ -504,7 +522,12 @@ impl Plant {
             (1.0 - (self.age - p.p_max) / p.p_max.max(1.0)).clamp(0.0, 1.0)
         };
         let q_base = self.node(self.root).q_acc;
-        let v_base = (p.gp * p.alpha * q_base).min(p.v_root_max) * senescence;
+        // Tolerance↔growth tradeoff: a shade-tolerant plant (cheap, durable
+        // leaves that subsist on low light) grows more slowly. So tolerance buys
+        // survival in shade (a lower carbon bar) at the cost of losing the
+        // height/light race — it is not a free advantage.
+        let tol_cost = 1.0 - 0.5 * p.shade_tolerance;
+        let v_base = (p.gp * p.alpha * q_base * tol_cost).min(p.v_root_max) * senescence;
 
         // Zero all routing state first, then seed the root. A node whose whole
         // subtree is dark (denom = 0) routes nothing, so its children must read
