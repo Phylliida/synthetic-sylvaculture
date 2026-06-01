@@ -629,22 +629,30 @@ impl Ecosystem {
         if self.plants.len() >= self.max_plants {
             return;
         }
+        // Vigor-scaled maturity (Makowski Sec. 6.3, F_eff = F_age·v̄rootmax/v̄root):
+        // a vigorous plant (root vigor near its max) flowers at its base age,
+        // while a struggling one matures later. Clamped so a near-zero-vigor
+        // seedling doesn't get an infinite age.
+        let flower_eff = |g: &Genome, rv: f32| -> f32 {
+            (g.flowering_age * g.v_root_max / rv.max(1.0)).clamp(g.flowering_age, g.flowering_age * 4.0)
+        };
         // Snapshot the parents first (releases the &self borrow before rng use).
-        // To flower a plant must be mature AND well-lit (health ≥ FLOWER_LIGHT) —
-        // real light, NOT the tolerance-lowered survival bar — so a shaded
-        // understory plant may survive but cannot breed until it reaches a gap.
-        let parents: Vec<(f32, f32, Genome, Vec3)> = self
+        // To flower a plant must be mature (vigor-scaled age) AND well-lit
+        // (health ≥ FLOWER_LIGHT) — real light, NOT the tolerance-lowered survival
+        // bar — so a shaded understory plant may survive but cannot breed until
+        // it reaches a gap.
+        let parents: Vec<(f32, f32, f32, Genome, Vec3)> = self
             .plants
             .iter()
             .zip(&self.genomes)
-            .map(|(pl, g)| (pl.age, pl.health(), g.clone(), pl.origin))
+            .map(|(pl, g)| (pl.age, pl.health(), pl.root_vigor(), g.clone(), pl.origin))
             .collect();
         let mut newborns: Vec<(Genome, Vec3)> = Vec::new();
-        for (age, health, g, origin) in &parents {
+        for (age, health, rv, g, origin) in &parents {
             if self.plants.len() + newborns.len() >= self.max_plants {
                 break;
             }
-            if *age < g.flowering_age || *health < FLOWER_LIGHT {
+            if *age < flower_eff(g, *rv) || *health < FLOWER_LIGHT {
                 continue;
             }
             if self.rng.gen::<f32>() < g.seed_freq * dt {
@@ -669,8 +677,8 @@ impl Ecosystem {
         // gaps take hold — recruitment by competition, not a schedule.
         let pool: Vec<Genome> = parents
             .iter()
-            .filter(|(age, health, g, _)| *age >= g.flowering_age && *health >= FLOWER_LIGHT)
-            .map(|(_, _, g, _)| g.clone())
+            .filter(|(age, health, rv, g, _)| *age >= flower_eff(g, *rv) && *health >= FLOWER_LIGHT)
+            .map(|(_, _, _, g, _)| g.clone())
             .collect();
         let mut rained = 0;
         while self.plants.len() < self.max_plants && rained < SEED_RAIN {

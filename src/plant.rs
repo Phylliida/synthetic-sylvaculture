@@ -282,6 +282,13 @@ impl Plant {
         self.health
     }
 
+    /// Resource (vigor) reaching the root this cycle — the plant's overall growth
+    /// budget. Compared to `params.v_root_max` it gives how vigorous the plant is
+    /// (used for vigor-scaled maturity: vigorous plants flower sooner).
+    pub fn root_vigor(&self) -> f32 {
+        self.node(self.root).vigor
+    }
+
     fn node(&self, id: ModuleId) -> &Internode {
         self.nodes[id].as_ref().unwrap()
     }
