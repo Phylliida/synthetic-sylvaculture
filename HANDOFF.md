@@ -29,7 +29,8 @@ cd synthetic-sylvaculture
 ./run.sh --eco           # ECOSYSTEM viewer (the main thing) — size-22 plot
 ./run.sh                 # single-plant viewer (N cycles species)
 cargo run -- --stats     # headless readouts incl. quantitative validation
-cargo test               # 25 tests (no GPU); SLOW (~4 min) — see gotchas
+cargo run --release -- --bench   # headless perf benchmark (sim + mesh; see Performance)
+cargo test --release     # 25 tests (no GPU); ~3 s (was ~4 min before the perf work)
 ./run.sh --tree 6 --steps 200 --shot t.png            # ONE species, framed solo
 ./run.sh --shot e.png --temp 26 --precip 320 --steps 170   # ecosystem frame
 ```
@@ -60,12 +61,12 @@ looks like a geometry bug).
 
 | File | What |
 |---|---|
-| `src/plant.rs` | The core. `Plant` (metamers + buds), the growth cycle, the `colonize`/`Occ`/`BudQuery`/`PointGrid` space-colonization core, self-shadow, shedding, pipe-model diameters, `health` (carbon balance), and geometry queries (`skeleton`/`leaves`/`shape`/`biomass`/`module_centres`/`active_buds`). |
+| `src/plant.rs` | The core. `Plant` (metamers + buds; a `live` counter + min-heap free-list back `module_count`/`alloc`), the growth cycle, the `colonize` (parallel marker loop)/`Occ`/`BudQuery`/`PointGrid`/`DenseOcc` space-colonization core, the `FxHasher`/`pack` fast voxel hashing, self-shadow, shedding, pipe-model diameters, `health` (carbon balance), and geometry queries. |
 | `src/species.rs` | 7 plant-type presets `preset(λ, D, gp, v_root_max, g2, s_tol, φ, env_h, env_r)` + per-species overrides (canopy species raise `max_modules`/`marker_count`/`v_root_max`); the morphology test suite. |
-| `src/ecosystem.rs` | `Ecosystem`: the **shared marker field**, `ShadowGrid` (inter-plant light), carbon-starvation `cull_dead`, seeding, `Climate`/`biome_name`. |
-| `src/mesh.rs` | Skeleton → generalized-cylinder mesh; foliage quads; per-species-coloured forest mesh. API-driven; untouched by the model work. |
+| `src/ecosystem.rs` | `Ecosystem`: the **shared marker field**, `ShadowGrid` (binned, branch-free deposit), carbon-starvation `cull_dead`, seeding, `Climate`/`biome_name`. `step_timed` (per-phase `StepTimings`); **plant-parallel grow** + parallel mesh gather (`trunk_batches`/`foliage_batches`). |
+| `src/mesh.rs` | Skeleton → generalized-cylinder mesh; foliage quads; **parallel in-place** per-species-coloured forest mesh (`balanced_ranges`/`carve_mut`/`uninit_vec` → prefix-sum slice fill, no concat). |
 | `src/overlay.rs` | 2D clickable Whittaker biome chart. |
-| `src/main.rs` | Viewers (`run`, `run_ecosystem`), `run_tree_shot` (`--tree`), `run_shot`, `run_stats` (incl. validation + a `loglog_slope` fitter). |
+| `src/main.rs` | Viewers (`run`, `run_ecosystem`), `run_tree_shot` (`--tree`), `run_shot`, `run_stats` (validation + `loglog_slope`), `run_bench` (`--bench`). |
 
 ---
 
@@ -150,8 +151,57 @@ it was never told:
   **≈ 0.51** (predicted 0.50; diameter ∝ √leaves).
 - **Self-thinning** (Yoda's −3/2 law): a dense even-aged cohort (the
   `seeding_enabled` flag turns recruitment off) thins while mean biomass rises →
-  slope **≈ −1.25…−1.37** (ideal −1.5; the residual is the per-species crown/
+  slope **≈ −1.25…−1.55** (ideal −1.5; the residual is the per-species crown/
   height cap). The shared field is what brought this near −1.5.
+
+---
+
+## Performance (`cargo run --release -- --bench`)
+
+`--bench` is a headless, deterministic benchmark (no GPU/mesh-upload, no new
+deps): it grows a worst-case tropical stand and reports per-phase ms/step for
+the sim (centres / colonize / shadow / grow / cull), a CPU mesh-build section
+(the per-frame render cost, GPU upload excluded), and a single-plant figure.
+`Ecosystem::step_timed` returns the per-phase breakdown.
+
+A 9-round pass took the worst case (tropical, 40→170 plants, ~80k modules) from
+**~25 s → ~3.6 s** wall for 170 sim steps (**~7×**; ~149 → ~21 ms/step), and the
+**per-frame mesh rebuild from ~148 ms → ~13 ms** (**~11×**, ~2.2M verts). A heavy
+interactive frame's CPU work (sim + mesh) went from ~300 ms to ~35 ms; the test
+suite from ~231 s to ~3 s. The single biggest fix was an accidental **O(n²)** —
+`module_count()` (then O(live)) called inside `grow()`'s per-bud loop, plus a
+linear free-slot scan in `alloc()`.
+
+What changed, in order (every step kept the stand **bit-identical** — final
+170 plants / 79885 modules — or, where f32 summation order changed, the stand
+came out identical and validation slopes held):
+
+1. **O(1) `module_count`** (a `live` counter) + **min-heap free-list `alloc`**
+   (reuses the lowest free slot, matching the old scan) — killed the O(n²).
+2. **FxHash** (rotate-xor-multiply) over **packed u64 voxel keys** for the
+   space-colonization grid / occupancy / self-shadow. NB: a plain multiplicative
+   hash on a packed key clusters badly (bucket index depends only on the lowest
+   coord); a **splitmix64 finalizer** fixes it — that was the whole win.
+3. **Shadow deposit**: branch-free clamped inner loop + **bin by voxel** (one
+   weighted pyramid per occupied cell, not one per module).
+4. **Dense bool occupancy grid** for the shared field (direct index, no hashing;
+   bounded to the fixed field box so it builds in one pass).
+5. **Parallel colonize** (the marker loop) and **parallel grow** (over plants),
+   via `std::thread::scope` (no deps). Both stay **bit-identical**: colonize uses
+   contiguous marker chunks merged in order (so `sum[bi] += dn` replays in
+   sequential order); grow mutates disjoint plants in place.
+6. **Parallel forest mesh build**: per-chunk vertex counts → prefix-sum offsets
+   → one allocation carved into disjoint slices → each work-balanced contiguous
+   chunk fills its slice on a thread. No concat copy; `uninit_vec`
+   (`with_capacity` + `set_len`, sound because the fill writes every plain-data
+   element) skips zeroing ~38 MB. Plus a **parallel per-plant gather**
+   (`skeleton`/`leaves`). Vertex order is preserved → bit-identical mesh.
+
+Determinism note: the parallel paths are reproducible because chunks are
+contiguous and merged/laid-out in order, independent of thread count or
+scheduling — so a given seed still yields the same stand and the same mesh on
+any machine. The mesh chunk count adapts to cores (capped at `MESH_CHUNKS` /
+`GROW_CHUNKS`); `--no-cache`-style determinism is unaffected.
 
 ---
 
@@ -171,12 +221,15 @@ MAX_FIELD_HEIGHT, OCC_R/PER_R/PER_COS, CARBON_THRESHOLD/ESTABLISH.
 
 ## Known limitations & gotchas
 
-1. **Performance is the main ceiling.** Bigger canopy trees mean more metamers →
-   heavier sim and mesh. A forest renders ~20–27 s / 170 steps (≈120–160 ms/step
-   — still animates in the viewer, just statelier). The **test suite is ~4 min**.
-   **Do not run multiple `cargo` invocations at once** — they fight the build lock
-   and a run can balloon; use `run_in_background` and wait. Smooth play at full
-   jungle scale wants the **LOD/instancing** on the future-work list.
+1. **Performance** — much improved (see the Performance section): a heavy
+   tropical frame is now ~21 ms sim + ~13 ms CPU mesh build (was ~150 + ~150),
+   and the test suite is **~3 s** (was ~4 min). The remaining interactive cost
+   is the **GPU upload** — `Mesh::new` re-uploads all ~2.2M verts every dirty
+   frame; `--bench` does NOT measure that. Cutting it is the **LOD / instancing /
+   vertex-reduction** future item. Still: **don't run multiple `cargo`
+   invocations at once** (they fight the build lock); use `run_in_background`.
+   Bench on `--release` and prefer a low-load box (a busy machine inflates all
+   phases — watch `loadavg`).
 2. **`--shot`/`--tree` "Segmentation fault" ≠ failed render** (exits after writing
    the PNG to skip the Wayland teardown). Always Read the PNG. Check `nvidia-smi`
    if renders OOM.
@@ -186,26 +239,30 @@ MAX_FIELD_HEIGHT, OCC_R/PER_R/PER_COS, CARBON_THRESHOLD/ESTABLISH.
    `g2` sign chosen heuristically.
 5. The **viewers** still crash on the Wayland teardown at window close (cosmetic;
    only the scripted `--shot`/`--tree` paths were fixed).
-6. `README.md` is **stale** — it still describes the old module-model milestones.
 
 ---
 
 ## What remains / future work (priority order)
 
-- **Forest LOD / instancing** — the big one now: needed for smooth interactive
-  play at canopy scale and to scale past a few hundred plants.
+- **GPU upload / LOD / instancing** — the remaining interactive cost now that
+  sim + CPU mesh build are fast. `Mesh::new` re-uploads ~2.2M verts/frame; cut it
+  by (a) **vertex reduction / LOD** (fewer trunk sides for thin branches, cheaper
+  foliage — cuts both CPU build and upload), (b) **instancing** (one leaf/segment
+  proto, per-instance transforms), or (c) **rebuild/upload only when changed**
+  (every N steps, or only dirty plants). Instrument `run_ecosystem` to measure
+  real frame time first.
 - **Terrain** — elevation lapse rate `T(h)=T(0)+γh` → treelines; soil/blocked map.
 - **Richer foliage** — textured/leaf-shaped quads; grass; better materials.
 - **More species** — fill out Tab. 4 / Fig. 21; more biome coverage.
 - **More validation** — allometry curves (Fig. 16); steeper self-thinning would
   need space-responsive envelopes (the crown/height cap is the −1.5 residual).
 - **Window-close teardown** — clean viewer exit (same `process::exit` trick).
-- **Refresh `README.md`** to the current model.
 
 ---
 
 ## Conventions
-- Verification here = `cargo test` (CPU) + `cargo run -- --stats` (CPU) + a
-  `--tree`/`--shot` PNG you actually open. Commit freely; small commits preferred.
+- Verification here = `cargo test --release` (CPU, ~3 s) + `cargo run -- --stats`
+  (CPU) + a `--tree`/`--shot` PNG you actually open; `--bench` for perf. Commit
+  freely; small commits preferred.
 - See `../CLAUDE.md` for workspace context (mostly Verus-specific; this subproject
   is plain Rust + three-d, no formal verification).
