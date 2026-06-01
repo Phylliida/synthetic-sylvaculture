@@ -805,8 +805,9 @@ fn run_ecosystem() {
 
     let mut playing = true;
     let mut step_count: u32 = 0;
-    let step_interval_ms = 120.0;
-    let mut accum_ms = 0.0f64;
+    // Run the sim unthrottled: each frame steps in a batch bounded only by this
+    // wall-clock budget, so the window still renders and stays interactive.
+    const STEP_BUDGET_S: f64 = 0.025;
     let mut show_foliage = true;
 
     println!("Synthetic Sylvaculture — Ecosystem");
@@ -907,7 +908,6 @@ fn run_ecosystem() {
             eco = Ecosystem::new(plant_count, eco_size, seed, climate);
             eco.set_field_height(eco_field_h); // keep the chosen vertical extent
             step_count = 0;
-            accum_ms = 0.0;
             dirty = true;
             println!(
                 "[reseed] {:.0}°C, {:.0}cm → {}",
@@ -930,12 +930,18 @@ fn run_ecosystem() {
         }
 
         if playing {
-            accum_ms += frame_input.elapsed_time;
-            while accum_ms >= step_interval_ms {
-                accum_ms -= step_interval_ms;
+            // Run as fast as possible: step in an unthrottled batch, bounded only
+            // by a small per-frame wall-clock budget so the window still renders
+            // and stays interactive. The mesh is rebuilt once per frame (below),
+            // not per step, so the sim advances many steps between redraws.
+            let t0 = std::time::Instant::now();
+            loop {
                 eco.step(1.0);
                 step_count += 1;
                 dirty = true;
+                if t0.elapsed().as_secs_f64() >= STEP_BUDGET_S {
+                    break;
+                }
             }
         }
 
