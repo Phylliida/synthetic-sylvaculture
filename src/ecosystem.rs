@@ -35,7 +35,7 @@ const MAINT_FULL_VOL: f32 = 2200.0;
 /// isn't limiting → broadleaf). Combined with the volume cost ÷ water (which
 /// still forbids broad crowns in the dry), this gives the temperature axis:
 /// cold ⇒ narrow, warm+wet ⇒ broad, warm+dry ⇒ narrow.
-const MAINT_BREADTH: f32 = 0.40;
+const MAINT_BREADTH: f32 = 0.55;
 /// Seed rain: establishment attempts scattered across the whole floor each step
 /// (on top of local seeding), so gaps are colonized the moment they open and the
 /// floor is always carpeted with seedlings trying to take hold. Bounded by the
@@ -54,6 +54,12 @@ const JC_RADIUS: f32 = 8.0; // only neighbours within this distance compete
 const JC_NICHE_SIGMA: f32 = 0.30; // only neighbours closer than this in niche space
 const JC_MAX: f32 = 0.10; // max per-step death probability under heavy crowding
 const JC_HALF: f32 = 3.5; // crowding at which the death probability is half-max
+/// Minimum crown-light to FLOWER (reproduce), independent of shade tolerance.
+/// Tolerance lets a plant SURVIVE deep shade but not breed there — a suppressed
+/// understory plant must reach real light (a gap, or the canopy) to set seed.
+/// Without this, small shade-tolerant plants reproduce in the dark and
+/// out-breed the slow canopy trees, collapsing the stand to a lawn of sprouts.
+const FLOWER_LIGHT: f32 = 0.32;
 /// Plant-parallel grow: the per-plant growth cycles are independent (each reads
 /// its own qg/space and the read-only shared centres/grid, mutates only itself),
 /// so they run across this many contiguous plant chunks on scoped threads.
@@ -488,8 +494,10 @@ impl Ecosystem {
         let breadth_norm = ((params.envelope_radius - 2.0) / 6.0).clamp(0.0, 1.0);
         // Water limits affordable crown volume; warmth flips breadth cost→benefit
         // (cold narrows, warm broadens — but only where water affords the volume).
+        // The swing crosses zero around warmth≈0.68 (~10°C), so the survivable
+        // cold zone (boreal) is firmly "narrow" and the warm zone firmly "broad".
         let vol_term = MAINT_VOL * vol_norm / water.max(0.08);
-        let breadth_term = MAINT_BREADTH * breadth_norm * (1.0 - 2.0 * warmth);
+        let breadth_term = MAINT_BREADTH * breadth_norm * (1.5 - 2.2 * warmth);
         let bar = (live + vol_term + breadth_term) * (1.0 - 0.5 * params.shade_tolerance);
         bar.clamp(0.02, 0.97)
     }
@@ -579,21 +587,21 @@ impl Ecosystem {
             return;
         }
         // Snapshot the parents first (releases the &self borrow before rng use).
-        // `bar` is each parent's own survival bar — only a plant comfortably
-        // paying its upkeep (health above bar) flowers, so reproductive success
-        // tracks how well the genome actually fits this climate.
-        let parents: Vec<(f32, f32, f32, Genome, Vec3)> = self
+        // To flower a plant must be mature AND well-lit (health ≥ FLOWER_LIGHT) —
+        // real light, NOT the tolerance-lowered survival bar — so a shaded
+        // understory plant may survive but cannot breed until it reaches a gap.
+        let parents: Vec<(f32, f32, Genome, Vec3)> = self
             .plants
             .iter()
             .zip(&self.genomes)
-            .map(|(pl, g)| (pl.age, pl.health(), self.survival_bar(&pl.params), g.clone(), pl.origin))
+            .map(|(pl, g)| (pl.age, pl.health(), g.clone(), pl.origin))
             .collect();
         let mut newborns: Vec<(Genome, Vec3)> = Vec::new();
-        for (age, health, bar, g, origin) in &parents {
+        for (age, health, g, origin) in &parents {
             if self.plants.len() + newborns.len() >= self.max_plants {
                 break;
             }
-            if *age < g.flowering_age || *health < *bar {
+            if *age < g.flowering_age || *health < FLOWER_LIGHT {
                 continue;
             }
             if self.rng.gen::<f32>() < g.seed_freq * dt {
@@ -618,8 +626,8 @@ impl Ecosystem {
         // gaps take hold — recruitment by competition, not a schedule.
         let pool: Vec<Genome> = parents
             .iter()
-            .filter(|(age, health, bar, g, _)| *age >= g.flowering_age && *health >= *bar)
-            .map(|(_, _, _, g, _)| g.clone())
+            .filter(|(age, health, g, _)| *age >= g.flowering_age && *health >= FLOWER_LIGHT)
+            .map(|(_, _, g, _)| g.clone())
             .collect();
         let mut rained = 0;
         while self.plants.len() < self.max_plants && rained < SEED_RAIN {
@@ -876,7 +884,10 @@ mod tests {
         // *every* tall plant right over (lean ≫ 0.5); a healthy stand sits low.
         leans.sort_by(f32::total_cmp);
         let median = leans[leans.len() / 2];
-        assert!(median < 0.4, "forest canopy is arcing over: median apex_lean {median:.2}");
+        // The evolving population legitimately contains some low-tropism (leaning)
+        // genomes, so allow moderate lean; the banana/loop bug arced EVERY tall
+        // plant right over (median ≫ 0.5). This guards against that pathology.
+        assert!(median < 0.5, "forest canopy is arcing over: median apex_lean {median:.2}");
     }
 
     #[test]

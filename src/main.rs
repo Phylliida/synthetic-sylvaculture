@@ -108,16 +108,22 @@ fn run_stats() {
     println!("\necosystem: EVOLUTION (temperate, mean genome over time from random founders):");
     {
         let mut eco = Ecosystem::new(50, 19.0, 4, temperate);
-        for s in 1..=500 {
+        for s in 1..=1600 {
             eco.step(1.0);
-            if [1, 150, 320, 500].contains(&s) {
-                if let Some(m) = eco.mean_traits() {
-                    println!(
-                        "  step {s:>3}  established {:>3}/{:>3}  {}",
+            if [1, 200, 500, 900, 1300, 1600].contains(&s) {
+                let mut h = eco.plant_heights();
+                h.sort_by(f32::total_cmp);
+                let (med, tall) = if h.is_empty() { (0.0, 0.0) } else { (h[h.len() / 2], *h.last().unwrap()) };
+                match eco.mean_traits() {
+                    Some(m) => println!(
+                        "  step {s:>4}  est {:>3}/{:>3}  med_h {:>4.1} tall {:>4.1}  {}",
                         eco.established_count(),
                         eco.plant_count(),
+                        med,
+                        tall,
                         key(&m)
-                    );
+                    ),
+                    None => println!("  step {s:>4}  est 0/{:>3}  (all sprouts — collapsed)", eco.plant_count()),
                 }
             }
         }
