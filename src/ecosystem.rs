@@ -198,8 +198,10 @@ pub struct Ecosystem {
     /// is no fixed species list — founders get random genomes and seeds inherit
     /// the parent's genome with mutation, so morphology is sculpted by selection.
     pub genomes: Vec<Genome>,
-    /// Half-extent of the square ground.
+    /// Half-extent of the square ground (horizontal plot size).
     pub size: f32,
+    /// Vertical extent of the free-space field (ceiling that trees grow into).
+    pub field_height: f32,
     pub age: f32,
     /// Global shadowing on/off (Sec. 6.2). Off = plants ignore each other's shade.
     pub shadow_enabled: bool,
@@ -286,6 +288,7 @@ impl Ecosystem {
             plants: Vec::new(),
             genomes: Vec::new(),
             size,
+            field_height: MAX_FIELD_HEIGHT,
             age: 0.0,
             shadow_enabled: true,
             seeding_enabled: true,
@@ -296,16 +299,8 @@ impl Ecosystem {
             rng,
         };
 
-        // Shared free-space field over the plot (a box up to MAX_FIELD_HEIGHT).
-        // Density is modest for performance; the stand competes for these points.
-        let max_h = MAX_FIELD_HEIGHT;
-        let count = (FIELD_DENSITY * (2.0 * size) * (2.0 * size) * max_h) as usize;
-        for _ in 0..count {
-            let x = eco.rng.gen_range(-size..size);
-            let z = eco.rng.gen_range(-size..size);
-            let y = eco.rng.gen_range(0.0..max_h);
-            eco.markers.push(vec3(x, y, z));
-        }
+        // Shared free-space field over the plot (a box up to field_height).
+        eco.regenerate_field();
 
         // Founders: a uniform-random genome each (a broad initial gene pool).
         // Specialization to the climate emerges from selection on these, not
@@ -319,6 +314,54 @@ impl Ecosystem {
             eco.genomes.push(g);
         }
         eco
+    }
+
+    /// (Re)scatter the shared free-space marker field over the current plot
+    /// (`±size` × `0..field_height`). Density is modest for performance; the
+    /// stand competes for these points. Called on construction and on resize.
+    fn regenerate_field(&mut self) {
+        self.markers.clear();
+        let count =
+            (FIELD_DENSITY * (2.0 * self.size) * (2.0 * self.size) * self.field_height) as usize;
+        for _ in 0..count {
+            let x = self.rng.gen_range(-self.size..self.size);
+            let z = self.rng.gen_range(-self.size..self.size);
+            let y = self.rng.gen_range(0.0..self.field_height);
+            self.markers.push(vec3(x, y, z));
+        }
+    }
+
+    /// Grow / shrink the plot horizontally (half-extent), regenerating the marker
+    /// field and removing any plants now outside the bounds (when shrinking). The
+    /// existing stand is kept — it expands into new space or is clipped.
+    pub fn set_size(&mut self, new_size: f32) {
+        self.size = new_size.clamp(6.0, 60.0);
+        self.regenerate_field();
+        let s = self.size;
+        let keep: Vec<bool> = self
+            .plants
+            .iter()
+            .map(|p| p.origin.x.abs() <= s && p.origin.z.abs() <= s)
+            .collect();
+        let mut i = 0;
+        self.plants.retain(|_| {
+            let k = keep[i];
+            i += 1;
+            k
+        });
+        let mut j = 0;
+        self.genomes.retain(|_| {
+            let k = keep[j];
+            j += 1;
+            k
+        });
+    }
+
+    /// Raise / lower the vertical extent of the free-space field — the ceiling
+    /// trees grow into. Regenerates the marker field; the stand is kept.
+    pub fn set_field_height(&mut self, new_h: f32) {
+        self.field_height = new_h.clamp(8.0, 90.0);
+        self.regenerate_field();
     }
 
     /// A monospecific even-aged cohort: `n` clones of one genome, scattered on
@@ -392,7 +435,7 @@ impl Ecosystem {
         // and lets it build in one pass (no bbox scan).
         let bounds = (
             vec3(-self.size, 0.0, -self.size),
-            vec3(self.size, MAX_FIELD_HEIGHT, self.size),
+            vec3(self.size, self.field_height, self.size),
         );
         let vs = colonize(
             &mut self.markers,
@@ -415,7 +458,7 @@ impl Ecosystem {
         // --- 2. global shadow grid → per-module light g (inter-plant shading).
         let s0 = Instant::now();
         let grid = if self.shadow_enabled {
-            let mut g = ShadowGrid::new(self.size, MAX_FIELD_HEIGHT, 1.5);
+            let mut g = ShadowGrid::new(self.size, self.field_height, 1.5);
             // `wood` is the same flattened set of module centres (built above for
             // occupancy), still in scope — reuse it rather than reflatten.
             g.deposit_binned(&wood);
@@ -907,5 +950,29 @@ mod tests {
             shaded.total_modules(),
             lit.total_modules()
         );
+    }
+
+    #[test]
+    fn resizing_culls_out_of_bounds_and_keeps_the_stand() {
+        let mut eco = grown(Climate { temp: 12.0, precip: 110.0 }, 120);
+        let n0 = eco.plant_count();
+        assert!(n0 > 0);
+        // Shrink horizontally: every kept plant is within the new bounds.
+        eco.set_size(8.0);
+        assert!((eco.size - 8.0).abs() < 1e-3);
+        assert!(eco.plant_count() <= n0);
+        assert!(eco
+            .plants
+            .iter()
+            .all(|p| p.origin.x.abs() <= 8.0 + 1e-3 && p.origin.z.abs() <= 8.0 + 1e-3));
+        // Grow back, then change the vertical ceiling — the stand is kept intact.
+        eco.set_size(20.0);
+        let n1 = eco.plant_count();
+        eco.set_field_height(55.0);
+        assert!((eco.field_height - 55.0).abs() < 1e-3);
+        assert_eq!(eco.plant_count(), n1, "changing the ceiling must not cull plants");
+        // Clamped to sane bounds.
+        eco.set_size(1000.0);
+        assert!(eco.size <= 60.0);
     }
 }

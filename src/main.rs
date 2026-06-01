@@ -756,11 +756,12 @@ fn run_ecosystem() {
     let key = DirectionalLight::new(&context, 2.6, Srgba::new(255, 247, 230, 255), vec3(-0.5, -1.0, -0.7));
     let fill = DirectionalLight::new(&context, 0.9, Srgba::new(180, 200, 255, 255), vec3(0.8, -0.4, 0.5));
 
-    let eco_size = 22.0f32;
+    let mut eco_size = 22.0f32;
     let plant_count = 40;
     let mut seed = 7u64;
     let mut climate = Climate { temp: 10.0, precip: 90.0 };
     let mut eco = Ecosystem::new(plant_count, eco_size, seed, climate);
+    let mut eco_field_h = eco.field_height; // vertical extent (growth ceiling)
 
     let mut ground = Gm::new(
         Mesh::new(&context, &CpuMesh::square()),
@@ -811,6 +812,7 @@ fn run_ecosystem() {
     println!("Synthetic Sylvaculture — Ecosystem");
     println!("  Space play/pause · S step · R reseed · F foliage · mouse orbit/zoom");
     println!("  ←/→ temperature · ↑/↓ precipitation · or CLICK the biome chart (top-left)");
+    println!("  −/= shrink/grow plot (horizontal) · PageDown/PageUp lower/raise ceiling (vertical)");
     println!(
         "  climate: {:.0}°C, {:.0}cm  →  {}",
         climate.temp,
@@ -824,6 +826,7 @@ fn run_ecosystem() {
 
         let mut dirty = false;
         let mut reset = false;
+        let mut resized = false;
 
         // Intercept clicks on the biome chart *before* the orbit control, so a
         // chart click sets the climate instead of spinning the camera.
@@ -871,6 +874,29 @@ fn run_ecosystem() {
                         climate.precip = (climate.precip + 15.0).clamp(10.0, 400.0);
                         reset = true;
                     }
+                    // Plot area, in place (keeps the standing forest):
+                    // − / = widen-narrow horizontally, PageUp/PageDown raise/lower
+                    // the vertical growth ceiling.
+                    Key::Minus => {
+                        eco.set_size(eco_size - 3.0);
+                        eco_size = eco.size;
+                        resized = true;
+                    }
+                    Key::Equals | Key::Plus => {
+                        eco.set_size(eco_size + 3.0);
+                        eco_size = eco.size;
+                        resized = true;
+                    }
+                    Key::PageDown => {
+                        eco.set_field_height(eco_field_h - 5.0);
+                        eco_field_h = eco.field_height;
+                        resized = true;
+                    }
+                    Key::PageUp => {
+                        eco.set_field_height(eco_field_h + 5.0);
+                        eco_field_h = eco.field_height;
+                        resized = true;
+                    }
                     _ => {}
                 }
             }
@@ -879,6 +905,7 @@ fn run_ecosystem() {
         if reset {
             seed += 1;
             eco = Ecosystem::new(plant_count, eco_size, seed, climate);
+            eco.set_field_height(eco_field_h); // keep the chosen vertical extent
             step_count = 0;
             accum_ms = 0.0;
             dirty = true;
@@ -887,6 +914,18 @@ fn run_ecosystem() {
                 climate.temp,
                 climate.precip,
                 biome_name(climate.temp, climate.precip)
+            );
+        }
+
+        if resized {
+            // Resize is in place (forest kept); just refresh the ground + meshes.
+            ground.set_transformation(Mat4::from_angle_x(degrees(-90.0)) * Mat4::from_scale(eco_size * 2.2));
+            dirty = true;
+            println!(
+                "[area] horizontal ±{:.0}  vertical ceiling {:.0}  (plants {})",
+                eco_size,
+                eco_field_h,
+                eco.plant_count()
             );
         }
 
