@@ -85,6 +85,13 @@ pub struct PlantParams {
     /// Leader up-righting strength: how strongly terminal (axis-continuing)
     /// shoots steer back toward vertical, keeping a straight bole.
     pub tropism_up: f32,
+    /// Optimal-direction weight ξ (Pałubicki §4.2): a continuing shoot's heading
+    /// is a weighted sum of the *default orientation* (the parent axis heading,
+    /// implicit weight 1) and the optimal growth direction V (weight ξ). ξ<1
+    /// keeps axes stiff — they bend gently toward free space rather than snapping
+    /// to V each step. Without this term (pure V) axes wander/wiggle like worms,
+    /// because V jitters as markers are consumed and neighbours compete.
+    pub xi: f32,
     /// Senescence onset age (p_max): past it the resource ramps to zero.
     pub p_max: f32,
     /// Shade tolerance s_tol ∈ [0,1]: the global-shadow light floor,
@@ -134,6 +141,7 @@ impl Default for PlantParams {
             g1: 1.6,
             g2: -0.18,
             tropism_up: 0.30,
+            xi: 0.25,
             p_max: 1.0e9,
             shade_tolerance: 0.0,
             shed_ratio: 0.35, // shed lateral branches whose mean light < 0.35
@@ -566,15 +574,23 @@ impl Plant {
             if self.module_count() >= p.max_modules {
                 break;
             }
-            // Terminal bud → continue the axis (same order), steering toward the
-            // free space the bud perceived (V); falls back to the current axis
-            // direction if V is unavailable.
+            // Terminal bud → continue the axis (same order). Pałubicki §4.2: the
+            // new shoot's heading is a weighted sum of the DEFAULT ORIENTATION
+            // (the parent axis heading, weight 1) and the optimal growth
+            // direction V toward free space (weight ξ). The default-orientation
+            // term is the axis stiffness that keeps a bole straight; steering is
+            // a gentle bend toward V, not a snap to it (which wiggles).
             let n = self.node(id);
             if n.terminal_bud {
                 let v = n.term_resource;
                 if v >= 1.0 {
                     let order = n.order;
-                    let dir = if n.v_grow.length_squared() > 1e-6 { n.v_grow } else { n.dir };
+                    let axis = n.dir.normalize_or_zero();
+                    let dir = if n.v_grow.length_squared() > 1e-6 {
+                        (axis + n.v_grow.normalize_or_zero() * p.xi).normalize_or_zero()
+                    } else {
+                        axis
+                    };
                     self.node_mut(id).terminal_bud = false;
                     self.sprout(id, dir, order, v, true);
                 }

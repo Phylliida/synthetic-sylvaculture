@@ -621,6 +621,7 @@ fn run_tree_shot() {
     let idx: usize = val("--tree").and_then(|s| s.parse().ok()).unwrap_or(0);
     let steps: u32 = val("--steps").and_then(|s| s.parse().ok()).unwrap_or(120);
     let path = val("--shot").cloned().unwrap_or_else(|| "/tmp/tree.png".to_string());
+    let bare = args.iter().any(|a| a == "--bare"); // skeleton only (branch geometry)
     let (w, h) = (900u32, 1100u32);
 
     let window = Window::new(WindowSettings {
@@ -680,7 +681,11 @@ fn run_tree_shot() {
     );
 
     target.clear(ClearState::color_and_depth(0.62, 0.74, 0.90, 1.0, 1.0));
-    target.render(&camera, ground.into_iter().chain(&tree).chain(&foliage), &[&ambient, &key, &fill]);
+    if bare {
+        target.render(&camera, ground.into_iter().chain(&tree), &[&ambient, &key, &fill]);
+    } else {
+        target.render(&camera, ground.into_iter().chain(&tree).chain(&foliage), &[&ambient, &key, &fill]);
+    }
     let pixels = target.read_color::<[u8; 4]>();
 
     let mut img = image::RgbaImage::new(w, h);
