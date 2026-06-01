@@ -32,6 +32,7 @@ cargo run -- --stats     # headless readouts incl. quantitative validation
 cargo run --release -- --bench   # headless perf benchmark (sim + mesh; see Performance)
 cargo test --release     # 25 tests (no GPU); ~3 s (was ~4 min before the perf work)
 ./run.sh --tree 6 --steps 200 --shot t.png            # ONE species, framed solo
+./run.sh --tree 0 --steps 160 --bare --shot t.png     # ...skeleton only (branch geometry)
 ./run.sh --shot e.png --temp 26 --precip 320 --steps 170   # ecosystem frame
 ```
 
@@ -94,7 +95,13 @@ tip carries a terminal bud). `Plant::new(params, origin)`. Each step:
 4. **carbon balance** — `health` (EMA of mean foliage light) is updated; drives
    mortality in the ecosystem.
 5. **bud fate** — a bud with resource `v` sprouts `n = ⌊v⌋` metamers of length
-   `v/n` (capped at `MAX_SHOOT`/step), steered toward `V`. Shoot length ∝ vigor.
+   `v/n` (capped at `MAX_SHOOT`/step). Shoot length ∝ vigor. A continuing shoot's
+   heading is the **weighted sum of three vectors** (Pałubicki §4.2): the
+   *default orientation* (the parent axis heading, weight 1 — the axis stiffness
+   that keeps a bole straight), the optimal growth direction `V` (weight `ξ`),
+   and tropism (weight `η`, the `Vec3::Y` pull in `sprout`). Heading toward pure
+   `V` instead — dropping the default-orientation term — makes axes wander/wiggle
+   like worms, since `V` jitters as markers are consumed and neighbours compete.
 6. **shedding** (§4.4) — a lateral branch whose mean light is below `shed_ratio`
    is dropped → clean boles under shade (shade-tolerant species keep theirs).
 7. **diameters** — pipe model `d = √(Σ d_child²)`, φ at the tips (Eq. 8), so
@@ -215,7 +222,11 @@ angle), g2 (droop), envelope_height/radius (crown silhouette + size), φ (trunk
 thickness scale), max_modules (size budget — canopy species need it high),
 v_root_max (resource), climate optima, shade_tolerance, seeding. Global feel
 (`PlantParams`/`ecosystem.rs` consts): α, climb_rate, MAX_SHOOT, FIELD_DENSITY,
-MAX_FIELD_HEIGHT, OCC_R/PER_R/PER_COS, CARBON_THRESHOLD/ESTABLISH.
+MAX_FIELD_HEIGHT, OCC_R/PER_R/PER_COS, CARBON_THRESHOLD/ESTABLISH, **`ξ`**
+(optimal-direction weight — how hard a shoot bends toward free space vs. holding
+its axis; low = straight/stiff, high = wandering/gnarled; default 0.25, global).
+`ξ` is a good per-species knob if wanted: low for excurrent (conifer/poplar
+leaders ramrod-straight), higher for gnarled decurrent forms (Pałubicki Fig. 12).
 
 ---
 
@@ -233,8 +244,11 @@ MAX_FIELD_HEIGHT, OCC_R/PER_R/PER_COS, CARBON_THRESHOLD/ESTABLISH.
 2. **`--shot`/`--tree` "Segmentation fault" ≠ failed render** (exits after writing
    the PNG to skip the Wayland teardown). Always Read the PNG. Check `nvidia-smi`
    if renders OOM.
-3. **Occasional reaching limb** — the crown bound mostly stops trees racing into
-   open space, but a stand-edge tree can still send one thin limb out.
+3. **Occasional reaching limb / lean** — the crown bound mostly stops trees
+   racing into open space, but a stand-edge tree can still send one thin limb
+   out, or lean toward one-sided light (axis persistence makes a consistent
+   sideways pull accumulate rather than cancel; `ξ` and `tropism_up` trade this
+   off against straightness). Inspect with `--tree --bare`.
 4. **Species presets are adapted, not transcribed** from Tab. 4 (units differ);
    `g2` sign chosen heuristically.
 5. The **viewers** still crash on the Wayland teardown at window close (cosmetic;
