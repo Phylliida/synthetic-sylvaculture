@@ -83,7 +83,7 @@ const RANGES: [Range; 17] = [
     Range(20.0, 90.0),  // flowering_age
     Range(4.0, 16.0),   // seed_radius
     Range(0.02, 0.12),  // seed_freq
-    Range(80.0, 260.0), // lifespan (p_max) — death ≈ 1.9×, so ~152–494 steps;
+    Range(80.0, 780.0), // lifespan (p_max) — death ≈ 1.9×, so ~152–1480 steps;
                         // long enough that a plant reliably seeds before it dies,
                         // but finite so the canopy still turns over (gap churn).
 ];
