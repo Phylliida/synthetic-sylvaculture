@@ -29,7 +29,8 @@
 //! is procedural and emerges from the competition for light.
 
 use glam::Vec3;
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 /// Stable id of an internode (kept named `ModuleId` for the ecosystem API).
 pub type ModuleId = usize;
@@ -199,6 +200,12 @@ impl Internode {
 pub struct Plant {
     /// Internode storage; `None` slots are shed metamers (ids stay stable).
     nodes: Vec<Option<Internode>>,
+    /// Count of live (`Some`) slots — `module_count()` in O(1).
+    live: usize,
+    /// Freed (shed) slots, min-first, so `alloc` reuses the lowest free index
+    /// (matching the old linear `position(is_none)` scan) in O(log n) instead
+    /// of O(n) — the latter made a whole growth O(n²).
+    free: BinaryHeap<Reverse<ModuleId>>,
     root: ModuleId,
     pub params: PlantParams,
     /// Plant age p_t (simulation steps / "years").
@@ -245,6 +252,8 @@ impl Plant {
         );
         Plant {
             nodes: vec![Some(seed)],
+            live: 1,
+            free: BinaryHeap::new(),
             root: 0,
             params,
             age: 0.0,
@@ -270,7 +279,7 @@ impl Plant {
         (0..self.nodes.len()).filter(|&i| self.nodes[i].is_some()).collect()
     }
     pub fn module_count(&self) -> usize {
-        self.nodes.iter().filter(|n| n.is_some()).count()
+        self.live
     }
 
     /// Advance the simulation one step (standalone plant: own marker dome,
@@ -468,8 +477,9 @@ impl Plant {
     fn light_pass(&mut self) {
         for &id in &self.post_order(self.root) {
             let mut acc = self.q_self(id);
-            let kids: Vec<ModuleId> = self.node(id).children.clone();
-            for c in kids {
+            let nc = self.node(id).children.len();
+            for ci in 0..nc {
+                let c = self.node(id).children[ci];
                 acc += self.node(c).q_acc;
             }
             self.node_mut(id).q_acc = acc;
@@ -720,6 +730,8 @@ impl Plant {
         }
         for d in dead {
             self.nodes[d] = None;
+            self.free.push(Reverse(d));
+            self.live -= 1;
         }
     }
 
@@ -727,11 +739,16 @@ impl Plant {
     fn recompute_diameters(&mut self) {
         let phi = self.params.phi;
         for &id in &self.post_order(self.root) {
-            let kids: Vec<ModuleId> = self.node(id).children.clone();
-            let d = if kids.is_empty() {
+            let nc = self.node(id).children.len();
+            let d = if nc == 0 {
                 phi
             } else {
-                kids.iter().map(|&c| self.node(c).diam.powi(2)).sum::<f32>().sqrt().max(phi)
+                let mut sum = 0.0f32;
+                for ci in 0..nc {
+                    let c = self.node(id).children[ci];
+                    sum += self.node(c).diam.powi(2);
+                }
+                sum.sqrt().max(phi)
             };
             self.node_mut(id).diam = d;
         }
@@ -739,7 +756,8 @@ impl Plant {
 
     // --- storage / traversal helpers -----------------------------------------
     fn alloc(&mut self, n: Internode) -> ModuleId {
-        if let Some(slot) = self.nodes.iter().position(|s| s.is_none()) {
+        self.live += 1;
+        if let Some(Reverse(slot)) = self.free.pop() {
             self.nodes[slot] = Some(n);
             slot
         } else {
