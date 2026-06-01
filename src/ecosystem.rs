@@ -20,6 +20,11 @@ const PER_COS: f32 = 0.3;
 /// species' light, so tolerant climax species survive shade that kills pioneers.
 const CARBON_ESTABLISH: f32 = 30.0;
 const CARBON_THRESHOLD: f32 = 0.18;
+/// Plant-parallel grow: the per-plant growth cycles are independent (each reads
+/// its own qg/space and the read-only shared centres/grid, mutates only itself),
+/// so they run across this many contiguous plant chunks on scoped threads.
+/// Bit-identical: each plant is processed in place, order preserved.
+const GROW_CHUNKS: usize = 32;
 use glam::{vec3, Vec3};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -347,14 +352,39 @@ impl Ecosystem {
         };
         t.shadow = s0.elapsed().as_secs_f64();
 
-        // --- 3. grow each plant in the shared field.
+        // --- 3. grow each plant in the shared field. Plants are independent, so
+        // run them across scoped threads (each builds its own qg from the shared
+        // read-only centres/grid). Contiguous &mut chunks, processed in place →
+        // bit-identical to the sequential loop.
         let g0 = Instant::now();
-        for (pi, p) in self.plants.iter_mut().enumerate() {
-            let qg: FxIdMap<f32> = centres[pi]
-                .iter()
-                .map(|(id, c)| (*id, grid.as_ref().map(|g| g.light_at(*c)).unwrap_or(1.0)))
-                .collect();
-            p.step_in_field(dt, &qg, &space[pi]);
+        {
+            let grid_ref = grid.as_ref();
+            let centres_ref = &centres;
+            let space_ref = &space;
+            let nplants = self.plants.len();
+            let n_chunks = GROW_CHUNKS
+                .min(std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1))
+                .max(1);
+            let chunk_size = nplants.div_ceil(n_chunks).max(1);
+            std::thread::scope(|scope| {
+                let mut base = 0usize;
+                for chunk in self.plants.chunks_mut(chunk_size) {
+                    let start = base;
+                    base += chunk.len();
+                    scope.spawn(move || {
+                        for (k, p) in chunk.iter_mut().enumerate() {
+                            let pi = start + k;
+                            let qg: FxIdMap<f32> = centres_ref[pi]
+                                .iter()
+                                .map(|(id, c)| {
+                                    (*id, grid_ref.map(|g| g.light_at(*c)).unwrap_or(1.0))
+                                })
+                                .collect();
+                            p.step_in_field(dt, &qg, &space_ref[pi]);
+                        }
+                    });
+                }
+            });
         }
         t.grow = g0.elapsed().as_secs_f64();
 
