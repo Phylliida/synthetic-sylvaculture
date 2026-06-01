@@ -480,28 +480,67 @@ impl Ecosystem {
         self.plants.iter().map(|p| p.height()).collect()
     }
 
-    /// Per-plant trunk segments tinted with that plant's bark colour.
-    pub fn trunk_batches(&self) -> Vec<(Vec<Segment>, [u8; 3])> {
-        self.plants
-            .iter()
-            .zip(&self.species_idx)
-            .map(|(p, &si)| {
-                let c = self.species[si].bark_rgb;
-                (p.skeleton(), [c.0, c.1, c.2])
-            })
-            .collect()
+    /// Contiguous plant-index chunks for parallel per-plant gather, in order.
+    fn plant_chunks(&self) -> Vec<(usize, usize)> {
+        let n = self.plants.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        let nc = GROW_CHUNKS
+            .min(std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1))
+            .min(n)
+            .max(1);
+        let cs = n.div_ceil(nc).max(1);
+        (0..n).step_by(cs).map(|s| (s, (s + cs).min(n))).collect()
     }
 
-    /// Per-plant leaf points tinted with that plant's leaf colour.
+    /// Per-plant trunk segments tinted with that plant's bark colour. The
+    /// per-plant `skeleton()` calls are independent, so gather them in parallel
+    /// (order preserved: chunks are contiguous and flattened in order).
+    pub fn trunk_batches(&self) -> Vec<(Vec<Segment>, [u8; 3])> {
+        let (plants, sidx, species) = (&self.plants, &self.species_idx, &self.species);
+        let parts: Vec<Vec<(Vec<Segment>, [u8; 3])>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = self
+                .plant_chunks()
+                .into_iter()
+                .map(|(s, e)| {
+                    scope.spawn(move || {
+                        (s..e)
+                            .map(|i| {
+                                let c = species[sidx[i]].bark_rgb;
+                                (plants[i].skeleton(), [c.0, c.1, c.2])
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        parts.into_iter().flatten().collect()
+    }
+
+    /// Per-plant leaf points tinted with that plant's leaf colour (parallel
+    /// gather like `trunk_batches`).
     pub fn foliage_batches(&self) -> Vec<(Vec<(Vec3, Vec3)>, [u8; 3])> {
-        self.plants
-            .iter()
-            .zip(&self.species_idx)
-            .map(|(p, &si)| {
-                let c = self.species[si].leaf_rgb;
-                (p.leaves(), [c.0, c.1, c.2])
-            })
-            .collect()
+        let (plants, sidx, species) = (&self.plants, &self.species_idx, &self.species);
+        let parts: Vec<Vec<(Vec<(Vec3, Vec3)>, [u8; 3])>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = self
+                .plant_chunks()
+                .into_iter()
+                .map(|(s, e)| {
+                    scope.spawn(move || {
+                        (s..e)
+                            .map(|i| {
+                                let c = species[sidx[i]].leaf_rgb;
+                                (plants[i].leaves(), [c.0, c.1, c.2])
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        parts.into_iter().flatten().collect()
     }
 }
 
