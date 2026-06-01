@@ -14,7 +14,7 @@ mod overlay;
 mod plant;
 mod species;
 
-use ecosystem::{biome_name, Climate, Ecosystem};
+use ecosystem::{biome_name, Climate, Ecosystem, StepTimings};
 use glam::vec3 as gvec3;
 use plant::{Plant, PlantParams};
 use three_d::*;
@@ -396,6 +396,126 @@ fn render_shot(context: &Context, eco: &Ecosystem, climate: Climate, w: u32, h: 
     target.read_color::<[u8; 4]>()
 }
 
+/// Headless performance benchmark — no window, no GL, no mesh, just the
+/// simulation. `cargo run --release -- --bench [--steps N] [--plants N]
+/// [--size S] [--seed K] [--temp T] [--precip P]`.
+///
+/// Deterministic (ChaCha8 seed) in the *simulation*; only the wall-clock timing
+/// varies run to run, so we report means and percentiles. Defaults match the
+/// `--shot` ecosystem (40 plants, size 22, seed 7) in the heaviest biome (warm/
+/// wet → a closed canopy, the most modules) so the numbers reflect worst case.
+fn run_bench() {
+    use std::time::Instant;
+    let args: Vec<String> = std::env::args().collect();
+    let val = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1));
+    let num = |flag: &str, d: f32| val(flag).and_then(|s| s.parse().ok()).unwrap_or(d);
+    let steps = num("--steps", 170.0) as usize;
+    let n = num("--plants", 40.0) as usize;
+    let size = num("--size", 22.0);
+    let seed = num("--seed", 7.0) as u64;
+    let temp = num("--temp", 26.0);
+    let precip = num("--precip", 320.0);
+    let climate = Climate { temp, precip };
+
+    println!("=== ECOSYSTEM BENCH ===");
+    println!(
+        "plants {n}  size {size}  seed {seed}  steps {steps}  climate {temp}°C/{precip}cm  ({})",
+        biome_name(temp, precip)
+    );
+
+    let mut eco = Ecosystem::new(n, size, seed, climate);
+    let mut totals = StepTimings::default();
+    let mut step_ms: Vec<f64> = Vec::with_capacity(steps);
+    let mut modules_at: Vec<usize> = Vec::with_capacity(steps);
+
+    let wall0 = Instant::now();
+    for _ in 0..steps {
+        let t = eco.step_timed(1.0);
+        totals.centres += t.centres;
+        totals.colonize += t.colonize;
+        totals.shadow += t.shadow;
+        totals.grow += t.grow;
+        totals.cull_seed += t.cull_seed;
+        step_ms.push(t.total() * 1000.0);
+        modules_at.push(eco.total_modules());
+    }
+    let wall = wall0.elapsed().as_secs_f64();
+
+    let pct = |v: &[f64], p: f64| -> f64 {
+        let mut s = v.to_vec();
+        s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        s[((p * (s.len() as f64 - 1.0)).round() as usize).min(s.len() - 1)]
+    };
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
+
+    let plants = eco.plant_count();
+    let modules = eco.total_modules();
+    println!(
+        "\nfinal: {plants} plants, {modules} modules ({:.0}/plant)",
+        modules as f32 / plants.max(1) as f32
+    );
+    println!("wall:  {:.2} s for {steps} steps", wall);
+    println!(
+        "step:  mean {:.1} ms · median {:.1} · p95 {:.1} · max {:.1}",
+        mean(&step_ms),
+        pct(&step_ms, 0.5),
+        pct(&step_ms, 0.95),
+        step_ms.iter().cloned().fold(0.0, f64::max),
+    );
+
+    // ms/step over time (quartile means) — shows how cost scales as trees fill.
+    let q = steps / 4;
+    if q > 0 {
+        let qm = |a: usize, b: usize| mean(&step_ms[a..b.min(step_ms.len())]);
+        println!(
+            "      over time (ms/step, quartiles): {:.1} → {:.1} → {:.1} → {:.1}",
+            qm(0, q),
+            qm(q, 2 * q),
+            qm(2 * q, 3 * q),
+            qm(3 * q, steps),
+        );
+        println!(
+            "      modules    (quartile ends):     {} → {} → {} → {}",
+            modules_at[q - 1],
+            modules_at[2 * q - 1],
+            modules_at[3 * q - 1],
+            modules_at[steps - 1],
+        );
+    }
+
+    let tot = totals.total().max(1e-12);
+    let row = |name: &str, s: f64| {
+        println!("      {name:<10} {:6.1} ms/step  {:4.1}%", s / steps as f64 * 1000.0, s / tot * 100.0);
+    };
+    println!("\nphase breakdown (mean ms/step, % of sim time):");
+    row("centres", totals.centres);
+    row("colonize", totals.colonize);
+    row("shadow", totals.shadow);
+    row("grow", totals.grow);
+    row("cull/seed", totals.cull_seed);
+
+    // --- single-plant micro-bench (Consume mode: own dome + self-shadow). ---
+    println!("\n=== SINGLE-PLANT BENCH (tropical, Consume mode) ===");
+    let sp = &species::library()[6]; // tropical broadleaf — the biggest single tree
+    let mut plant = make_plant(sp.params.clone());
+    let tsteps = num("--tree-steps", 200.0) as usize;
+    let mut tms: Vec<f64> = Vec::with_capacity(tsteps);
+    let tw0 = Instant::now();
+    for _ in 0..tsteps {
+        let s = Instant::now();
+        plant.step(1.0);
+        tms.push(s.elapsed().as_secs_f64() * 1000.0);
+    }
+    let tw = tw0.elapsed().as_secs_f64();
+    println!(
+        "{tsteps} steps in {:.2} s · mean {:.2} ms/step · p95 {:.2} · final {} modules",
+        tw,
+        mean(&tms),
+        pct(&tms, 0.95),
+        plant.module_count(),
+    );
+}
+
 /// `--shot <file.png> [--temp T] [--precip P] [--steps N]`: grow an ecosystem
 /// and save a screenshot (needs a GL context, so it opens a window briefly).
 fn run_shot() {
@@ -737,6 +857,10 @@ fn run_ecosystem() {
 fn main() {
     if std::env::args().any(|a| a == "--stats") {
         run_stats();
+        return;
+    }
+    if std::env::args().any(|a| a == "--bench") {
+        run_bench();
         return;
     }
     if std::env::args().any(|a| a == "--tree") {

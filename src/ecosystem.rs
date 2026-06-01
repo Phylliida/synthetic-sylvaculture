@@ -24,6 +24,30 @@ use glam::{vec3, Vec3};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::collections::HashMap;
+use std::time::Instant;
+
+/// Per-phase wall-clock breakdown of one `Ecosystem::step`, in seconds. The
+/// benchmark harness (`--bench`) accumulates these to show where the step's
+/// time goes (Instant overhead is ~ns, negligible against a ~100 ms step).
+#[derive(Default, Clone, Copy)]
+pub struct StepTimings {
+    /// Per-plant `module_centres()` (reused by occupancy, shadow, and g lookup).
+    pub centres: f64,
+    /// Bud + wood gather, the shared-field `colonize`, and the `space` scatter.
+    pub colonize: f64,
+    /// Global shadow grid allocation + deposition.
+    pub shadow: f64,
+    /// Per-plant `step_in_field` (the metamer growth cycle).
+    pub grow: f64,
+    /// Mortality cull + seeding.
+    pub cull_seed: f64,
+}
+
+impl StepTimings {
+    pub fn total(&self) -> f64 {
+        self.centres + self.colonize + self.shadow + self.grow + self.cull_seed
+    }
+}
 
 /// Global shadow-propagation grid (Pałubicki 2009; Silviculture Sec. 6.2).
 /// Each module casts a downward pyramidal penumbra into a voxel grid; a module
@@ -244,6 +268,12 @@ impl Ecosystem {
     }
 
     pub fn step(&mut self, dt: f32) {
+        let _ = self.step_timed(dt);
+    }
+
+    /// Like `step`, but returns a per-phase wall-clock breakdown (`--bench`).
+    pub fn step_timed(&mut self, dt: f32) -> StepTimings {
+        let mut t = StepTimings::default();
         self.age += dt;
 
         // --- 1. shared space colonization: all plants' buds compete for the one
@@ -251,9 +281,12 @@ impl Ecosystem {
         // free their space); each free marker goes to the nearest perceiving bud.
         // Per-plant internode centres, computed once and reused (wood occupancy,
         // shadow deposition, and the g lookup).
+        let c0 = Instant::now();
         let centres: Vec<Vec<(ModuleId, Vec3)>> =
             self.plants.iter().map(|p| p.module_centres()).collect();
+        t.centres = c0.elapsed().as_secs_f64();
 
+        let k0 = Instant::now();
         let mut bud_keys: Vec<(usize, ModuleId)> = Vec::new();
         let mut buds: Vec<BudQuery> = Vec::new();
         let mut wood: Vec<Vec3> = Vec::new();
@@ -274,8 +307,10 @@ impl Ecosystem {
                 space[pi].insert(id, dir);
             }
         }
+        t.colonize = k0.elapsed().as_secs_f64();
 
         // --- 2. global shadow grid → per-module light g (inter-plant shading).
+        let s0 = Instant::now();
         let grid = if self.shadow_enabled {
             let mut g = ShadowGrid::new(self.size, MAX_FIELD_HEIGHT, 1.5);
             for plant_centres in &centres {
@@ -287,8 +322,10 @@ impl Ecosystem {
         } else {
             None
         };
+        t.shadow = s0.elapsed().as_secs_f64();
 
         // --- 3. grow each plant in the shared field.
+        let g0 = Instant::now();
         for (pi, p) in self.plants.iter_mut().enumerate() {
             let qg: HashMap<ModuleId, f32> = centres[pi]
                 .iter()
@@ -296,11 +333,15 @@ impl Ecosystem {
                 .collect();
             p.step_in_field(dt, &qg, &space[pi]);
         }
+        t.grow = g0.elapsed().as_secs_f64();
 
+        let m0 = Instant::now();
         self.cull_dead();
         if self.seeding_enabled {
             self.seed(dt);
         }
+        t.cull_seed = m0.elapsed().as_secs_f64();
+        t
     }
 
     /// Remove plants that die, opening gaps (Sec. 4.2): old age (senescence), or
