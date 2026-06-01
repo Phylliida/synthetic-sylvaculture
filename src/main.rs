@@ -494,6 +494,53 @@ fn run_bench() {
     row("grow", totals.grow);
     row("cull/seed", totals.cull_seed);
 
+    // --- render-path CPU cost: the per-frame mesh rebuild (GPU upload via
+    // Mesh::new is NOT measured here — it needs a GL context — but it scales
+    // with the reported vertex counts). Uses the grown `eco` above.
+    println!("\n=== MESH BUILD (CPU side of the render path; GPU upload excluded) ===");
+    let reps = 30usize;
+    let (mut t_trunk, mut t_fol) = (0.0f64, 0.0f64);
+    let (mut g_trunk, mut g_fol) = (0.0f64, 0.0f64);
+    for _ in 0..reps {
+        let s = Instant::now();
+        let tb = eco.trunk_batches();
+        g_trunk += s.elapsed().as_secs_f64();
+        let _tm = mesh::build_forest_mesh(&tb, 6);
+        t_trunk += s.elapsed().as_secs_f64();
+        let s = Instant::now();
+        let fb = eco.foliage_batches();
+        g_fol += s.elapsed().as_secs_f64();
+        let _fm = mesh::build_forest_foliage(&fb, 0.4, 5);
+        t_fol += s.elapsed().as_secs_f64();
+    }
+    println!(
+        "  (gather: trunk_batches {:.1} ms · foliage_batches {:.1} ms — sequential)",
+        g_trunk / reps as f64 * 1000.0,
+        g_fol / reps as f64 * 1000.0,
+    );
+    let segs: usize = eco.trunk_batches().iter().map(|(s, _)| s.len()).sum();
+    let leaves: usize = eco.foliage_batches().iter().map(|(p, _)| p.len()).sum();
+    // sides=6 → 12 verts & 12 tris per segment; per_cluster=5 → 20 verts & 10 tris per leaf.
+    let (tv, tt) = (segs * 12, segs * 12);
+    let (fv, ft) = (leaves * 20, leaves * 10);
+    let trunk_ms = t_trunk / reps as f64 * 1000.0;
+    let fol_ms = t_fol / reps as f64 * 1000.0;
+    println!(
+        "trunk: {segs} segs → {} verts / {} tris · build {:.1} ms",
+        tv, tt, trunk_ms
+    );
+    println!(
+        "foliage: {leaves} twigs → {} verts / {} tris · build {:.1} ms",
+        fv, ft, fol_ms
+    );
+    println!(
+        "TOTAL mesh build {:.1} ms/frame ({} verts, {} tris) — vs sim {:.1} ms/step",
+        trunk_ms + fol_ms,
+        tv + fv,
+        tt + ft,
+        mean(&step_ms),
+    );
+
     // --- single-plant micro-bench (Consume mode: own dome + self-shadow). ---
     println!("\n=== SINGLE-PLANT BENCH (tropical, Consume mode) ===");
     let sp = &species::library()[6]; // tropical broadleaf — the biggest single tree
