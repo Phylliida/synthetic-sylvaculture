@@ -3,21 +3,21 @@
 A Rust reproduction of **Makowski et al. 2019, _Synthetic Silviculture: Multi-scale
 Modeling of Plant Ecosystems_** (SIGGRAPH / ACM TOG 38(4)), built on the
 self-organizing tree model of **Pałubicki et al. 2009, _Self-organizing Tree
-Models for Image Synthesis_**. This file is the orientation map for picking it
-back up. Both papers are in the repo:
+Models for Image Synthesis_**. This file is the orientation map. Both papers are
+in the repo:
 
 - `Makowski.etal-2019-Synthetic-Silviculture.pdf` — the ecosystem-scale target.
-- `selforg.sig2009.pdf` — Pałubicki 2009, the source for the metamer model,
-  extended Borchert–Honda vigor distribution, shadow propagation, and **space
-  colonization** (the environment method this project now uses).
+- `selforg.sig2009.pdf` — Pałubicki 2009: the metamer model, extended
+  Borchert–Honda vigor, shadow propagation, and **space colonization** (§4.1).
 
-> **Model note (read this first):** the plant-growth core was **rewritten** from
-> the paper's fixed-prototype "branch module" abstraction to the underlying
-> **Pałubicki metamer model**, with **space colonization** as its environment.
-> The earlier module model (prototypes, a 9-prototype morphospace, an orientation
-> optimizer, `v_min`/`growth_floor`) is **gone** — `src/prototype.rs` is deleted.
-> See "Model" below. (Old commits `5a68a1e`…`27dc224` and prior HANDOFF revisions
-> describe that retired model.)
+> **What this is now:** a self-organizing forest. Individual trees grow by the
+> Pałubicki **metamer model**; the whole stand competes for one **shared
+> free-space marker field** (space colonization); trees are bounded and shaped by
+> that competition + light, self-prune clean boles, and **die of carbon
+> starvation** when overtopped — so succession (pioneer→climax), self-thinning,
+> and a layered canopy all *emerge*. The original fixed-prototype "branch module"
+> model is gone (`src/prototype.rs` deleted). Nearly every behaviour is emergent,
+> tuned by a small set of per-species parameters, not scripted.
 
 ---
 
@@ -26,33 +26,33 @@ back up. Both papers are in the repo:
 ```sh
 cd synthetic-sylvaculture
 
-./run.sh                 # single-plant viewer
-./run.sh --eco           # ECOSYSTEM viewer (the main thing)
-cargo run -- --stats     # headless tuning/validation readouts (no GPU)
-cargo test               # 25 tests (no GPU); SLOW (~5–8 min), see gotchas
-./run.sh --tree 0 --steps 120 --shot tree.png         # ONE species, framed solo
-./run.sh --shot eco.png --temp 12 --precip 130 --steps 150   # ecosystem frame
+./run.sh --eco           # ECOSYSTEM viewer (the main thing) — size-22 plot
+./run.sh                 # single-plant viewer (N cycles species)
+cargo run -- --stats     # headless readouts incl. quantitative validation
+cargo test               # 25 tests (no GPU); SLOW (~4 min) — see gotchas
+./run.sh --tree 6 --steps 200 --shot t.png            # ONE species, framed solo
+./run.sh --shot e.png --temp 26 --precip 320 --steps 170   # ecosystem frame
 ```
 
-**NixOS:** the GUI must run through `./run.sh` (enters `shell.nix`). Plain `cargo
-run` fails — winit dlopens the Wayland/X11 libs and they're not on the default
-loader path. GL comes from `/run/opengl-driver/lib`.
-
-**Reading the PDFs here:** no `pdftoppm`, so the Read tool can't render pages.
-Extract text with `nix-shell -p poppler-utils --run "pdftotext file.pdf out.txt"`.
+**NixOS:** the GUI must run through `./run.sh` (enters `shell.nix`); plain `cargo
+run` can't find the dlopen'd windowing libs. GL is from `/run/opengl-driver/lib`.
+**PDFs:** no `pdftoppm` here, so the Read tool can't render pages — extract text
+with `nix-shell -p poppler-utils --run "pdftotext file.pdf out.txt"`.
 
 ### Viewer controls
-- **Single-plant** (`./run.sh`): Space play/pause · S step · R reset ·
-  ←/→ apical control λ · ↑/↓ growth rate · N cycle species · F foliage.
-- **Ecosystem** (`./run.sh --eco`): Space · S · R reseed · F foliage · **click the
-  biome triangle (top-left)** or ←/→ temperature, ↑/↓ precipitation to set climate.
+- **Ecosystem** (`./run.sh --eco`): Space play/pause · S step · R reseed · F
+  foliage · ←/→ temperature, ↑/↓ precipitation, *or click the Whittaker biome
+  triangle (top-left)*. Try temperate (poplar emergents over understory) vs
+  tropical (closed canopy). Mouse orbits/zooms.
+- **Single plant** (`./run.sh`): Space/S/R · N cycle species · ←/→ apical
+  control λ · ↑/↓ growth rate · F foliage.
 
-### Self-verifying renders (the GUI can't be watched in this environment)
-`--tree`/`--shot` render off-screen to a PNG you then open/inspect. **A
-"Segmentation fault" from these is NOT a failed render** — they call
-`std::process::exit(0)` after saving to dodge a Wayland-teardown segfault; the
-PNG is already written. Always judge by the PNG. If renders genuinely OOM-crash,
-check `nvidia-smi` (a full GPU looks exactly like a geometry bug).
+### Self-verifying renders
+`--shot`/`--tree` render off-screen to a PNG you then open. **A "Segmentation
+fault" from these is NOT a failed render** — they `std::process::exit(0)` after
+saving to skip a Wayland-teardown crash; the PNG is already written. Always judge
+by the PNG. If renders genuinely OOM-crash, check `nvidia-smi` (full GPU VRAM
+looks like a geometry bug).
 
 ---
 
@@ -60,147 +60,152 @@ check `nvidia-smi` (a full GPU looks exactly like a geometry bug).
 
 | File | What |
 |---|---|
-| `src/plant.rs` | The core: `Plant`, `Internode` (metamer), `PlantParams`; the growth cycle (space colonization → light → Borchert–Honda vigor → bud fate/sprout → shed → pipe-model diameters); `skeleton()`/`leaves()`/`shape()`/`module_centres()`. |
-| `src/species.rs` | 7 plant-type presets (`preset(λ, D, gp, v_root_max, g2, s_tol, φ, env_h, env_r)` + climate/seeding traits) and the morphology test suite. |
-| `src/ecosystem.rs` | `Ecosystem`: many plants; `ShadowGrid` (global inter-plant shading → per-bud `g`); seeding, senescence/cull, `Climate` + `biome_name`. |
-| `src/mesh.rs` | Skeleton → generalized-cylinder `CpuMesh`; foliage leaf-quad fans; per-species-coloured forest mesh builders. API-driven (`Segment`, `(pos,dir)`), untouched by the rewrite. |
-| `src/overlay.rs` | 2D clickable Whittaker biome chart (screen↔climate mapping). |
-| `src/main.rs` | Viewers (`run` single-plant, `run_ecosystem`), `run_tree_shot` (`--tree`), `run_shot` (`--shot`), `run_stats`. |
-| ~~`src/prototype.rs`~~ | **Deleted** — the morphospace prototypes are obsolete under procedural metamer growth. |
+| `src/plant.rs` | The core. `Plant` (metamers + buds), the growth cycle, the `colonize`/`Occ`/`BudQuery`/`PointGrid` space-colonization core, self-shadow, shedding, pipe-model diameters, `health` (carbon balance), and geometry queries (`skeleton`/`leaves`/`shape`/`biomass`/`module_centres`/`active_buds`). |
+| `src/species.rs` | 7 plant-type presets `preset(λ, D, gp, v_root_max, g2, s_tol, φ, env_h, env_r)` + per-species overrides (canopy species raise `max_modules`/`marker_count`/`v_root_max`); the morphology test suite. |
+| `src/ecosystem.rs` | `Ecosystem`: the **shared marker field**, `ShadowGrid` (inter-plant light), carbon-starvation `cull_dead`, seeding, `Climate`/`biome_name`. |
+| `src/mesh.rs` | Skeleton → generalized-cylinder mesh; foliage quads; per-species-coloured forest mesh. API-driven; untouched by the model work. |
+| `src/overlay.rs` | 2D clickable Whittaker biome chart. |
+| `src/main.rs` | Viewers (`run`, `run_ecosystem`), `run_tree_shot` (`--tree`), `run_shot`, `run_stats` (incl. validation + a `loglog_slope` fitter). |
 
 ---
 
-## Model (Pałubicki metamer + space colonization)
+## The model
 
-A plant is a tree of **metamers** (`Internode`: an internode + an axillary
-lateral bud; an axis tip also carries a terminal bud). `Plant::new(params,
-origin)`. Each `step` (Pałubicki Fig. 3):
+A plant is a tree of **metamers** (`Internode` + axillary lateral bud; an axis
+tip carries a terminal bud). `Plant::new(params, origin)`. Each step:
 
-1. **environment — space colonization (§4.1).** Each plant has a dome-shaped
-   cloud of free-space **markers** (`generate_markers`, sized by
-   `envelope_height`×`envelope_radius`). Each step: consume markers within ρ
-   (`occupancy_radius`) of any bud; associate each remaining marker to the
-   nearest bud that perceives it (within `perception_radius` and a forward cone
-   `perception_cos`); a bud's `Q` = (has markers?) × global-shadow light `g`, and
-   its growth direction `V` = normalized sum of directions to those markers.
-   A **reachable ceiling** rises with age (`climb_rate`) so the dome is revealed
-   bottom-up → **gradual growth** (not an instant pop). A bud with no free space
-   gets `Q=0` and stops — this **bounds the leader** and fills the crown, and
-   removes the need for any separate orientation/collision optimizer.
-2. **light pass** — `Q` accumulates basipetally into `q_acc`.
-3. **vigor pass** — resource `v = α·Q_base` flows acropetally, split at each
-   branch by extended Borchert–Honda: `vm = v·λ·Qm/(λQm+(1−λ)Ql)`, `vl = …`.
-4. **bud fate** — a bud with resource `v` sprouts `n = ⌊v⌋` metamers of length
-   `v/n` (**shoot length ∝ vigor**), capped at `MAX_SHOOT`/step; shoots steer
-   toward `V` (open space).
-5. **shedding** (§4.4) — a branch with a low light/size ratio is dropped
-   (`shed_ratio`; **off by default** — this is the lever for clean boles).
-6. **diameters** — pipe model `d = √(Σ d_child²)`, φ at the tips (Eq. 8).
+1. **environment — space colonization (§4.1).** Buds compete for free-space
+   markers. Occupancy modes (`Occ`):
+   - **`Consume`** (standalone tree, `--tree`/single viewer): the plant depletes
+     its own private marker dome; depletion advances the frontier and bounds it.
+   - **`Wood`** (ecosystem): one **shared, persistent** field; occupancy is
+     recomputed each step against current wood (a voxel set), so a dead plant's
+     space reopens for neighbours and recruits.
+   Each bud (`BudQuery`) has a reveal **ceiling** (rises with age, capped at the
+   species height) and a **crown-radius** bound (fills a species-sized cylinder,
+   competes in overlaps — no bare limbs racing into open space). A free marker
+   goes to the nearest perceiving bud (within r, a forward cone); the bud's
+   growth direction `V` is the sum of marker directions. `Q` = space-presence ×
+   global-shadow light `g`.
+2. **light pass** — `Q` accumulates basipetally → `Q_acc`.
+3. **vigor pass** — resource `v = α·Q_base` flows acropetally, split by extended
+   Borchert–Honda: `vm = v·λQm/(λQm+(1−λ)Ql)`, `vl = …`.
+4. **carbon balance** — `health` (EMA of mean foliage light) is updated; drives
+   mortality in the ecosystem.
+5. **bud fate** — a bud with resource `v` sprouts `n = ⌊v⌋` metamers of length
+   `v/n` (capped at `MAX_SHOOT`/step), steered toward `V`. Shoot length ∝ vigor.
+6. **shedding** (§4.4) — a lateral branch whose mean light is below `shed_ratio`
+   is dropped → clean boles under shade (shade-tolerant species keep theirs).
+7. **diameters** — pipe model `d = √(Σ d_child²)`, φ at the tips (Eq. 8), so
+   **trunk diameter ∝ √(leaf count)**.
 
-**Apical control λ ≈ 0.5** spans excurrent↔decurrent (Pałubicki Fig. 7; λ>0.5
-leader-biased). **Maximum height/spread is set by the marker-cloud envelope**,
-not λ — the envelope IS the principled crown-silhouette control (the paper's
-crown shaping): poplar a tall narrow column, conifer a tall narrow spire, oak a
-short broad crown, shrub small. Species differ only by `λ / D (branch angle) /
-g2 (tropism) / envelope / niche (climate, shade tolerance, seeding)` — **no
-per-species silhouette hacks** (the paper's diversity is emergent, not
-hand-authored).
+**Apical control λ ≈ 0.5** spans excurrent↔decurrent (Pałubicki Fig. 7). Max
+height/spread is set by the **marker-cloud envelope** (the principled crown
+silhouette), not λ. Species differ only by λ / D (branch angle) / g2 (tropism) /
+envelope / niche (climate, shade tolerance, seeding) — plus, for the canopy
+species, a bigger module budget so they can grow tall and thick.
 
-**Ecosystem scale (Sec. 6, unchanged by the rewrite):** the `ShadowGrid` casts
-downward pyramidal penumbrae; each plant reads per-bud `g` from it for
-inter-plant competition (self-thinning, succession). Seeding/flowering + senescence
-(`p_max`) + cull drive succession & gap dynamics. Climatic adaptation (Eq. 11)
-scales `v_root_max` + seeding by a per-species Gaussian niche → biome composition.
+**Ecosystem (Sec. 6):** the `ShadowGrid` gives per-bud light `g` (inter-plant
+shading). **Carbon-starvation mortality** (`cull_dead`): an established plant
+(age > `CARBON_ESTABLISH`) dies when `health` < `CARBON_THRESHOLD` — overtopped,
+shaded trees can't pay their upkeep. Shade tolerance floors a species' light, so
+tolerant climax species survive shade that kills pioneers → succession. Seeding
++ climate (Eq. 11 Gaussian niche scaling vigor + seeding) → biome composition.
 
 ---
 
 ## What's done (commit-by-commit, recent first)
 
-- `c2d9e0d` **Growth-rate smoothing** — the rising-`climb_rate` ceiling reveals the
-  envelope bottom-up, so a tree grows gradually over tens of steps (and reaches
-  its full envelope height with proper taper) instead of consuming the whole
-  cloud in ~12 steps.
-- `f06896b` **Space colonization** (§4.1) — free-space marker competition as the
-  environment. Fixes the runaway leader (the metamer model's main failure):
-  bounded, full-crowned, envelope-differentiated trees.
-- `b984f04` **Metamer-model rewrite** — replaced the fixed-prototype module growth
-  with the faithful Pałubicki metamer model (BH split, `n=⌊v⌋` rule, pipe model).
-  Deleted `prototype.rs`. (Faithful but, on its own, whippy — hence space
-  colonization above.)
-- `547aed5` **Correctness test suite** — one test per paper mechanism.
-- earlier (`802dfa6`…`27dc224`): the retired **module model** (M1–M5: prototypes,
-  orientation optimizer, foliage, ecosystem, shadow grid, climate/biomes,
-  `--shot`/`--tree` harness). Most of that infrastructure (ecosystem, mesh,
-  overlay, shot modes, climate) carried forward; only the plant-growth core changed.
+- `4553e49` **Canopy scale-up** — taller/thicker canopy species (tropical/conifer/
+  poplar, envelopes 28–30, `max_modules` 1600–2500), larger plot (size 22),
+  raised field height (34) → tall thick trees and a layered stand.
+- `063f3f2` **Carbon-balance mortality** — competition-driven death (mean-foliage-
+  light health) → proper pioneer→climax succession.
+- `e5eec64` **Shared marker field** — stand-scale space colonization; genuine
+  competition; self-thinning steepened −1.05 → −1.37.
+- `f8637e4` **Self-shading + validation** — per-plant shadow for isolated trees;
+  `--stats` pipe-model & self-thinning fits.
+- `25c55df` **Shedding** — clean boles (§4.4).
+- `c2d9e0d` **Gradual growth** — the rising reveal ceiling.
+- `f06896b` **Space colonization** — bounds & shapes growth (fixed the whip).
+- `b984f04` **Metamer-model rewrite** — replaced the fixed-prototype module model;
+  deleted `prototype.rs`.
+- `547aed5` **Correctness suite** — one test per paper equation.
+- earlier: the retired module model (M1–M5) — ecosystem/mesh/overlay/shot
+  infrastructure carried forward; only the plant-growth core was replaced.
 
-**25 tests pass.** The `plant.rs` mechanism suite verifies the paper's *equations*
-directly (BH split λ:(1−λ), the `n=⌊v⌋` metamer rule, basipetal light, pipe model
-√Σd², shedding, senescence, vigor conservation). The `species.rs` morphology tests
-are **non-degeneracy sanity** (not aesthetic bands) — faithfulness was chosen over
-a tidy silhouette, so don't re-pin "pretty" thresholds.
+**25 tests pass.** The `plant.rs` mechanism suite verifies the equations directly
+(BH split, `n=⌊v⌋`, basipetal light, pipe model √Σd², shedding, senescence, vigor
+conservation, growth bounded). `species.rs` morphology tests are non-degeneracy
+sanity (faithfulness over a tidy silhouette).
+
+---
+
+## Quantitative validation (`cargo run -- --stats`)
+
+The headline payoff of getting the mechanisms right — the model agrees with laws
+it was never told:
+
+- **Pipe-model allometry** (Eq. 8): trunk diameter vs leaf count → log-log slope
+  **≈ 0.51** (predicted 0.50; diameter ∝ √leaves).
+- **Self-thinning** (Yoda's −3/2 law): a dense even-aged cohort (the
+  `seeding_enabled` flag turns recruitment off) thins while mean biomass rises →
+  slope **≈ −1.25…−1.37** (ideal −1.5; the residual is the per-species crown/
+  height cap). The shared field is what brought this near −1.5.
 
 ---
 
 ## Tuning harness
 
-`cargo run -- --stats` prints an apical-control λ sweep, per-species morphology
-(height / trunk_r / slenderness / spread / apex_lean, at ~70% of each species'
-lifespan), shadowing biomass cut, succession, and biome composition. Tune by
-reading the numbers **and** a `--tree`/`--shot` PNG together.
-
-Per-species knobs (`species.rs::preset`): **λ** (apical control / leader vs lateral
-balance), **D** (lateral branch angle), **g2** (lateral droop), **envelope_height /
-envelope_radius** (the crown silhouette — the main shape control), **φ** (trunk
-thickness), **v_root_max** (resource budget; climate scales it), plus climate optima
-+ seeding. Global growth feel: `alpha`, `climb_rate`, `MAX_SHOOT`, `internode_len`.
+`--stats` prints an apical-control λ sweep, per-species morphology (height,
+trunk_r, slenderness, spread at ~70% lifespan), succession, biome composition,
+and the two validation fits. Tune by reading the numbers **and** a `--tree`/
+`--shot` PNG. Per-species knobs (`species.rs`): λ (apical control), D (branch
+angle), g2 (droop), envelope_height/radius (crown silhouette + size), φ (trunk
+thickness scale), max_modules (size budget — canopy species need it high),
+v_root_max (resource), climate optima, shade_tolerance, seeding. Global feel
+(`PlantParams`/`ecosystem.rs` consts): α, climb_rate, MAX_SHOOT, FIELD_DENSITY,
+MAX_FIELD_HEIGHT, OCC_R/PER_R/PER_COS, CARBON_THRESHOLD/ESTABLISH.
 
 ---
 
 ## Known limitations & gotchas
 
-1. **Trees are a touch shrubby — no clean bare bole.** Branches start near the
-   ground because `shed_ratio = 0` (shedding off). Turning shedding on is exactly
-   how the paper grows "tall boles" (Pałubicki §4.4): shaded lower branches drop.
-   This is the most visible remaining realism lever and the natural next task.
-2. **The test suite is slow (~5–8 min)** — the metamer model has many more nodes
-   than the old module model, so the ecosystem tests do much more work per step.
+1. **Performance is the main ceiling.** Bigger canopy trees mean more metamers →
+   heavier sim and mesh. A forest renders ~20–27 s / 170 steps (≈120–160 ms/step
+   — still animates in the viewer, just statelier). The **test suite is ~4 min**.
    **Do not run multiple `cargo` invocations at once** — they fight the build lock
-   and a run can balloon to 15+ min. Run one at a time (use `run_in_background`
-   and wait for the completion notification).
-3. **`--shot`/`--tree` "Segmentation fault" is not a failed render** — it exits via
-   `process::exit(0)` after writing the PNG to skip the Wayland teardown crash.
-   Always Read the PNG. If renders OOM-crash, check `nvidia-smi`.
-4. **Species presets are adapted, not transcribed**, from Tab. 4 (the paper's units
-   differ from this model's scales). `g2` tropism sign was chosen heuristically.
-5. The single-plant and ecosystem **viewers** still crash on the same Wayland
-   teardown at window close (cosmetic — happens after you're done; only the
-   scripted `--shot`/`--tree` paths were fixed).
-6. **Forest canopy** reflects the climate's dominant species — a poplar-dominated
-   stand reads as narrow columns; a broad-species climate reads more canopy-like.
+   and a run can balloon; use `run_in_background` and wait. Smooth play at full
+   jungle scale wants the **LOD/instancing** on the future-work list.
+2. **`--shot`/`--tree` "Segmentation fault" ≠ failed render** (exits after writing
+   the PNG to skip the Wayland teardown). Always Read the PNG. Check `nvidia-smi`
+   if renders OOM.
+3. **Occasional reaching limb** — the crown bound mostly stops trees racing into
+   open space, but a stand-edge tree can still send one thin limb out.
+4. **Species presets are adapted, not transcribed** from Tab. 4 (units differ);
+   `g2` sign chosen heuristically.
+5. The **viewers** still crash on the Wayland teardown at window close (cosmetic;
+   only the scripted `--shot`/`--tree` paths were fixed).
+6. `README.md` is **stale** — it still describes the old module-model milestones.
 
 ---
 
-## What remains / future work
+## What remains / future work (priority order)
 
-Roughly in priority order:
-
-- **Shedding for clean boles** — enable/tune `shed_ratio` so shaded lower branches
-  drop, giving clear trunks (Pałubicki §4.4 "tall bole"). Biggest visible win.
-- **Per-species form polish** — tune envelopes / D / g2 (e.g. a cone-shaped
-  envelope for a sharper conifer spire; flatter acacia crown).
-- **Self-shading within a single tree** — `--tree` shots use only the marker field
-  (no neighbour shade); in the forest the global grid already self-shades. A
-  per-plant shadow pass would make isolated trees self-thin too.
-- **Forest LOD / instancing** — to scale past a few hundred plants.
+- **Forest LOD / instancing** — the big one now: needed for smooth interactive
+  play at canopy scale and to scale past a few hundred plants.
 - **Terrain** — elevation lapse rate `T(h)=T(0)+γh` → treelines; soil/blocked map.
-- **Validation plots** — the 3/2 self-thinning power law (Fig. 14) and allometry
-  (Fig. 16) as `--stats` outputs / tests.
-- **Window-close teardown** — make the viewers exit cleanly (same `process::exit`).
+- **Richer foliage** — textured/leaf-shaped quads; grass; better materials.
+- **More species** — fill out Tab. 4 / Fig. 21; more biome coverage.
+- **More validation** — allometry curves (Fig. 16); steeper self-thinning would
+  need space-responsive envelopes (the crown/height cap is the −1.5 residual).
+- **Window-close teardown** — clean viewer exit (same `process::exit` trick).
+- **Refresh `README.md`** to the current model.
 
 ---
 
 ## Conventions
 - Verification here = `cargo test` (CPU) + `cargo run -- --stats` (CPU) + a
   `--tree`/`--shot` PNG you actually open. Commit freely; small commits preferred.
-- See `../CLAUDE.md` for broader workspace context (mostly Verus-specific; this
-  subproject is plain Rust + three-d, no formal verification).
+- See `../CLAUDE.md` for workspace context (mostly Verus-specific; this subproject
+  is plain Rust + three-d, no formal verification).
