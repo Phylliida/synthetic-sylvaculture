@@ -308,7 +308,23 @@ impl Ecosystem {
             }
             wood.extend(centres[pi].iter().map(|(_, c)| *c));
         }
-        let vs = colonize(&mut self.markers, Occ::Wood(&wood), &buds, OCC_R, PER_R, PER_COS);
+        // Occupancy is only ever queried at marker cells, and all markers live
+        // in this fixed field box; wood outside it lands in cells no marker
+        // occupies, so bounding the dense grid to the box is exactly equivalent
+        // and lets it build in one pass (no bbox scan).
+        let bounds = (
+            vec3(-self.size, 0.0, -self.size),
+            vec3(self.size, MAX_FIELD_HEIGHT, self.size),
+        );
+        let vs = colonize(
+            &mut self.markers,
+            Occ::Wood(&wood),
+            &buds,
+            OCC_R,
+            PER_R,
+            PER_COS,
+            Some(bounds),
+        );
         let mut space: Vec<FxIdMap<Vec3>> = vec![FxIdMap::default(); self.plants.len()];
         for (i, v) in vs.into_iter().enumerate() {
             if let Some(dir) = v {

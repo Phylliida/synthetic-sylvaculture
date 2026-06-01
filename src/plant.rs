@@ -30,7 +30,7 @@
 
 use glam::Vec3;
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap};
 
 /// Stable id of an internode (kept named `ModuleId` for the ecosystem API).
 pub type ModuleId = usize;
@@ -417,6 +417,7 @@ impl Plant {
             p.occupancy_radius,
             p.perception_radius,
             p.perception_cos,
+            None,
         );
         let mut out = FxIdMap::default();
         for (i, v) in vs.into_iter().enumerate() {
@@ -1013,7 +1014,6 @@ impl std::hash::Hasher for FxHasher {
 }
 pub(crate) type BuildFx = std::hash::BuildHasherDefault<FxHasher>;
 pub(crate) type FxMap<V> = HashMap<u64, V, BuildFx>;
-type FxSet = HashSet<u64, BuildFx>;
 /// Module-id-keyed map with the fast hasher (for per-plant `qg`/`space`/shed).
 pub(crate) type FxIdMap<V> = HashMap<ModuleId, V, BuildFx>;
 
@@ -1088,6 +1088,62 @@ pub(crate) struct BudQuery {
     pub crown_r: f32,
 }
 
+/// Dense voxel-occupancy grid for the shared-field (`Wood`) case: a marker is
+/// occupied iff its cell (at occupancy resolution ρ) holds any wood. A bool
+/// grid over the wood bounding box gives O(1) direct-index lookup — far cheaper
+/// than hashing ~80k wood points and ~39k marker queries per step. Same
+/// predicate as the old hash set, so behaviour is identical.
+struct DenseOcc {
+    lo: (i32, i32, i32),
+    dim: (i32, i32, i32),
+    grid: Vec<bool>,
+}
+impl DenseOcc {
+    /// `bounds` (world min/max) lets the caller skip the bounding-box scan when
+    /// the extent is already known (the ecosystem's fixed field box) — then the
+    /// build is a single pass over wood. Without it, the bbox is derived from
+    /// wood in an extra pass.
+    fn build(wood: &[Vec3], inv: f32, bounds: Option<(Vec3, Vec3)>) -> Self {
+        if wood.is_empty() {
+            return DenseOcc { lo: (0, 0, 0), dim: (0, 0, 0), grid: Vec::new() };
+        }
+        let (lo, hi) = match bounds {
+            Some((mn, mx)) => (grid_key(mn, inv), grid_key(mx, inv)),
+            None => {
+                let (mut lo, mut hi) =
+                    ((i32::MAX, i32::MAX, i32::MAX), (i32::MIN, i32::MIN, i32::MIN));
+                for &p in wood {
+                    let c = grid_key(p, inv);
+                    lo = (lo.0.min(c.0), lo.1.min(c.1), lo.2.min(c.2));
+                    hi = (hi.0.max(c.0), hi.1.max(c.1), hi.2.max(c.2));
+                }
+                (lo, hi)
+            }
+        };
+        let dim = (hi.0 - lo.0 + 1, hi.1 - lo.1 + 1, hi.2 - lo.2 + 1);
+        let n = dim.0 as usize * dim.1 as usize * dim.2 as usize;
+        let mut s = DenseOcc { lo, dim, grid: vec![false; n] };
+        for &p in wood {
+            if let Some(i) = s.index(grid_key(p, inv)) {
+                s.grid[i] = true;
+            }
+        }
+        s
+    }
+    #[inline]
+    fn index(&self, c: (i32, i32, i32)) -> Option<usize> {
+        let (x, y, z) = (c.0 - self.lo.0, c.1 - self.lo.1, c.2 - self.lo.2);
+        if x < 0 || y < 0 || z < 0 || x >= self.dim.0 || y >= self.dim.1 || z >= self.dim.2 {
+            return None;
+        }
+        Some(x as usize + self.dim.0 as usize * (z as usize + self.dim.2 as usize * y as usize))
+    }
+    #[inline]
+    fn occupied(&self, c: (i32, i32, i32)) -> bool {
+        self.index(c).map(|i| self.grid[i]).unwrap_or(false)
+    }
+}
+
 /// How a marker becomes unavailable.
 pub(crate) enum Occ<'a> {
     /// Standalone tree: markers within ρ of a bud are CONSUMED (removed from the
@@ -1105,16 +1161,17 @@ pub(crate) fn colonize(
     occ_r: f32,
     per_r: f32,
     pcos: f32,
+    bounds: Option<(Vec3, Vec3)>,
 ) -> Vec<Option<Vec3>> {
     let bud_pts: Vec<Vec3> = buds.iter().map(|b| b.pos).collect();
     let bgrid = PointGrid::new(&bud_pts, per_r);
     let occ_inv = 1.0 / occ_r.max(0.1);
     let occ2 = occ_r * occ_r;
     let per2 = per_r * per_r;
-    // Wood occupancy as a voxel set (cell ≈ ρ): O(1) per marker.
-    let wood_cells: FxSet = match &occ {
-        Occ::Wood(w) => w.iter().map(|&p| pack(grid_key(p, occ_inv))).collect(),
-        Occ::Consume => FxSet::default(),
+    // Wood occupancy as a dense voxel grid (cell ≈ ρ): O(1) direct-index lookup.
+    let wood_occ = match &occ {
+        Occ::Wood(w) => Some(DenseOcc::build(w, occ_inv, bounds)),
+        Occ::Consume => None,
     };
     let consume = matches!(occ, Occ::Consume);
     let mut sum = vec![Vec3::ZERO; buds.len()];
@@ -1122,7 +1179,7 @@ pub(crate) fn colonize(
     let mut kept = Vec::with_capacity(markers.len());
     for &m in markers.iter() {
         let occupied = match &occ {
-            Occ::Wood(_) => wood_cells.contains(&pack(grid_key(m, occ_inv))),
+            Occ::Wood(_) => wood_occ.as_ref().unwrap().occupied(grid_key(m, occ_inv)),
             Occ::Consume => {
                 let mut o = false;
                 bgrid.for_near(m, |bi| {
