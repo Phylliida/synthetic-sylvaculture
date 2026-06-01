@@ -95,34 +95,30 @@ impl ShadowGrid {
         )
     }
 
-    fn in_bounds(&self, i: i32, j: i32, k: i32) -> bool {
-        i >= 0
-            && j >= 0
-            && k >= 0
-            && (i as usize) < self.nx
-            && (j as usize) < self.ny
-            && (k as usize) < self.nz
-    }
-
     fn idx(&self, i: i32, j: i32, k: i32) -> usize {
         i as usize + self.nx * (k as usize + self.nz * j as usize)
     }
 
     fn deposit(&mut self, p: Vec3) {
         let (ci, cj, ck) = self.ijk(p);
+        let (nx, ny, nz) = (self.nx as i32, self.ny as i32, self.nz as i32);
         for q in 0..=self.qmax {
             let j = cj - q; // shadow propagates downward
             if j < 0 {
                 break;
             }
+            if j >= ny {
+                continue; // module above the grid top (rare) — this layer only
+            }
             let ds = self.a * self.b.powi(-q);
-            for di in -q..=q {
-                for dk in -q..=q {
-                    let (i, k) = (ci + di, ck + dk);
-                    if self.in_bounds(i, j, k) {
-                        let id = self.idx(i, j, k);
-                        self.s[id] += ds;
-                    }
+            // Clamp the (di, dk) block to the grid once, so the inner loop is
+            // branch-free and indexes a contiguous row (one multiply per row).
+            let (i0, i1) = ((ci - q).max(0), (ci + q).min(nx - 1));
+            let (k0, k1) = ((ck - q).max(0), (ck + q).min(nz - 1));
+            for k in k0..=k1 {
+                let row = self.nx * (k as usize + self.nz * j as usize);
+                for i in i0..=i1 {
+                    self.s[row + i as usize] += ds;
                 }
             }
         }

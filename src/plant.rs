@@ -440,18 +440,18 @@ impl Plant {
         // ones (e.g. all of a narrow column) keep near-full light.
         let (a, b, c, qmax) = (1.0f32, 2.0f32, 16.0f32, 3i32);
         let key = |p: Vec3| {
-            ((p.x * inv).floor() as i32, (p.y * inv).floor() as i32, (p.z * inv).floor() as i32)
+            pack(((p.x * inv).floor() as i32, (p.y * inv).floor() as i32, (p.z * inv).floor() as i32))
         };
         let ids = self.alive_ids();
-        let mut s: HashMap<(i32, i32, i32), f32> = HashMap::new();
+        let mut s: FxMap<f32> = FxMap::default();
         for &id in &ids {
-            let (ci, cj, ck) = key(self.node(id).tip());
+            let (ci, cj, ck) = grid_key(self.node(id).tip(), inv);
             for q in 0..=qmax {
                 let j = cj - q; // shadow propagates downward
                 let ds = a * b.powi(-q);
                 for di in -q..=q {
                     for dk in -q..=q {
-                        *s.entry((ci + di, j, ck + dk)).or_insert(0.0) += ds;
+                        *s.entry(pack((ci + di, j, ck + dk))).or_insert(0.0) += ds;
                     }
                 }
             }
@@ -968,18 +968,64 @@ fn generate_markers(origin: Vec3, radius: f32, height: f32, count: usize) -> Vec
     out
 }
 
+/// FxHash-style hasher (rustc-hash): a single rotate-xor-multiply per key. The
+/// spatial-hash and occupancy maps below are keyed by integer voxel ids; the
+/// default SipHash is cryptographic and dominated `colonize`/`self_shadow`, so
+/// we hash packed `u64` cell keys with this instead. ~zero extra cost, no deps.
+#[derive(Default)]
+struct FxHasher {
+    h: u64,
+}
+const FX_K: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+impl std::hash::Hasher for FxHasher {
+    /// splitmix64 finalizer: our keys are packed voxel triples, so a plain
+    /// `key·K` would leave the bucket index (low bits) depending only on the
+    /// lowest-packed coordinate — catastrophic clustering for a grid. The
+    /// avalanche diffuses all bits into the low ones, so every coordinate
+    /// affects the bucket. (Cheap: 2 mults, vs SipHash's full mixing.)
+    fn finish(&self) -> u64 {
+        let mut z = self.h;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.h = (self.h.rotate_left(5) ^ i).wrapping_mul(FX_K);
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        // Generic fallback (unused on our u64 keys, but keep it correct).
+        for &b in bytes {
+            self.write_u64(b as u64);
+        }
+    }
+}
+type BuildFx = std::hash::BuildHasherDefault<FxHasher>;
+type FxMap<V> = HashMap<u64, V, BuildFx>;
+type FxSet = HashSet<u64, BuildFx>;
+
+/// Pack a voxel coordinate triple into a single `u64` key (21 bits each, with a
+/// +2^20 offset so the range is [-2^20, 2^20) per axis — far beyond any plot).
+fn pack(c: (i32, i32, i32)) -> u64 {
+    const B: i64 = 1 << 20;
+    const M: u64 = (1 << 21) - 1;
+    let (i, j, k) = c;
+    ((i as i64 + B) as u64 & M)
+        | (((j as i64 + B) as u64 & M) << 21)
+        | (((k as i64 + B) as u64 & M) << 42)
+}
+
 /// A small spatial hash over points (cell-bucketed indices) for near-linear
 /// neighbour queries during space colonization.
 struct PointGrid {
     inv: f32,
-    cells: HashMap<(i32, i32, i32), Vec<usize>>,
+    cells: FxMap<Vec<usize>>,
 }
 impl PointGrid {
     fn new(pts: &[Vec3], cell: f32) -> Self {
         let inv = 1.0 / cell.max(0.1);
-        let mut cells: HashMap<(i32, i32, i32), Vec<usize>> = HashMap::new();
+        let mut cells: FxMap<Vec<usize>> = FxMap::default();
         for (i, &p) in pts.iter().enumerate() {
-            cells.entry(grid_key(p, inv)).or_default().push(i);
+            cells.entry(pack(grid_key(p, inv))).or_default().push(i);
         }
         PointGrid { inv, cells }
     }
@@ -989,7 +1035,7 @@ impl PointGrid {
         for di in -1..=1 {
             for dj in -1..=1 {
                 for dk in -1..=1 {
-                    if let Some(v) = self.cells.get(&(ci + di, cj + dj, ck + dk)) {
+                    if let Some(v) = self.cells.get(&pack((ci + di, cj + dj, ck + dk))) {
                         for &i in v {
                             f(i);
                         }
@@ -1052,9 +1098,9 @@ pub(crate) fn colonize(
     let occ2 = occ_r * occ_r;
     let per2 = per_r * per_r;
     // Wood occupancy as a voxel set (cell ≈ ρ): O(1) per marker.
-    let wood_cells: HashSet<(i32, i32, i32)> = match &occ {
-        Occ::Wood(w) => w.iter().map(|&p| grid_key(p, occ_inv)).collect(),
-        Occ::Consume => HashSet::new(),
+    let wood_cells: FxSet = match &occ {
+        Occ::Wood(w) => w.iter().map(|&p| pack(grid_key(p, occ_inv))).collect(),
+        Occ::Consume => FxSet::default(),
     };
     let consume = matches!(occ, Occ::Consume);
     let mut sum = vec![Vec3::ZERO; buds.len()];
@@ -1062,7 +1108,7 @@ pub(crate) fn colonize(
     let mut kept = Vec::with_capacity(markers.len());
     for &m in markers.iter() {
         let occupied = match &occ {
-            Occ::Wood(_) => wood_cells.contains(&grid_key(m, occ_inv)),
+            Occ::Wood(_) => wood_cells.contains(&pack(grid_key(m, occ_inv))),
             Occ::Consume => {
                 let mut o = false;
                 bgrid.for_near(m, |bi| {
