@@ -973,7 +973,7 @@ fn generate_markers(origin: Vec3, radius: f32, height: f32, count: usize) -> Vec
 /// default SipHash is cryptographic and dominated `colonize`/`self_shadow`, so
 /// we hash packed `u64` cell keys with this instead. ~zero extra cost, no deps.
 #[derive(Default)]
-struct FxHasher {
+pub(crate) struct FxHasher {
     h: u64,
 }
 const FX_K: u64 = 0x51_7c_c1_b7_27_22_0a_95;
@@ -999,13 +999,13 @@ impl std::hash::Hasher for FxHasher {
         }
     }
 }
-type BuildFx = std::hash::BuildHasherDefault<FxHasher>;
-type FxMap<V> = HashMap<u64, V, BuildFx>;
+pub(crate) type BuildFx = std::hash::BuildHasherDefault<FxHasher>;
+pub(crate) type FxMap<V> = HashMap<u64, V, BuildFx>;
 type FxSet = HashSet<u64, BuildFx>;
 
 /// Pack a voxel coordinate triple into a single `u64` key (21 bits each, with a
 /// +2^20 offset so the range is [-2^20, 2^20) per axis — far beyond any plot).
-fn pack(c: (i32, i32, i32)) -> u64 {
+pub(crate) fn pack(c: (i32, i32, i32)) -> u64 {
     const B: i64 = 1 << 20;
     const M: u64 = (1 << 21) - 1;
     let (i, j, k) = c;

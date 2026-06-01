@@ -4,7 +4,7 @@
 //! each an independent growth simulation, rendered as one combined mesh.
 //! Global shadowing, seeding, and climate arrive in later stages.
 
-use crate::plant::{colonize, BudQuery, ModuleId, Occ, Plant, Segment};
+use crate::plant::{colonize, pack, BudQuery, FxMap, ModuleId, Occ, Plant, Segment};
 use crate::species::{self, Species};
 
 /// Shared marker field: vertical extent and density (markers per unit volume).
@@ -99,26 +99,40 @@ impl ShadowGrid {
         i as usize + self.nx * (k as usize + self.nz * j as usize)
     }
 
-    fn deposit(&mut self, p: Vec3) {
-        let (ci, cj, ck) = self.ijk(p);
+    /// Bin module centres to integer cells, then deposit one weighted pyramid
+    /// per occupied cell. Many modules share a voxel, and N identical pyramids
+    /// sum to one pyramid weighted by N (addition commutes), so this is exactly
+    /// equivalent to depositing per module — but at canopy density it is far
+    /// fewer pyramids than modules, so much cheaper.
+    fn deposit_binned(&mut self, centres: &[Vec3]) {
+        // cell key -> (ci, cj, ck, count)
+        let mut cells: FxMap<(i32, i32, i32, u32)> = FxMap::default();
+        for &p in centres {
+            let (ci, cj, ck) = self.ijk(p);
+            let e = cells.entry(pack((ci, cj, ck))).or_insert((ci, cj, ck, 0));
+            e.3 += 1;
+        }
         let (nx, ny, nz) = (self.nx as i32, self.ny as i32, self.nz as i32);
-        for q in 0..=self.qmax {
-            let j = cj - q; // shadow propagates downward
-            if j < 0 {
-                break;
-            }
-            if j >= ny {
-                continue; // module above the grid top (rare) — this layer only
-            }
-            let ds = self.a * self.b.powi(-q);
-            // Clamp the (di, dk) block to the grid once, so the inner loop is
-            // branch-free and indexes a contiguous row (one multiply per row).
-            let (i0, i1) = ((ci - q).max(0), (ci + q).min(nx - 1));
-            let (k0, k1) = ((ck - q).max(0), (ck + q).min(nz - 1));
-            for k in k0..=k1 {
-                let row = self.nx * (k as usize + self.nz * j as usize);
-                for i in i0..=i1 {
-                    self.s[row + i as usize] += ds;
+        for &(ci, cj, ck, n) in cells.values() {
+            let w = n as f32;
+            for q in 0..=self.qmax {
+                let j = cj - q; // shadow propagates downward
+                if j < 0 {
+                    break;
+                }
+                if j >= ny {
+                    continue; // cell above the grid top (rare) — this layer only
+                }
+                let ds = self.a * self.b.powi(-q) * w;
+                // Clamp the (di, dk) block to the grid once, so the inner loop is
+                // branch-free and indexes a contiguous row (one multiply / row).
+                let (i0, i1) = ((ci - q).max(0), (ci + q).min(nx - 1));
+                let (k0, k1) = ((ck - q).max(0), (ck + q).min(nz - 1));
+                for k in k0..=k1 {
+                    let row = self.nx * (k as usize + self.nz * j as usize);
+                    for i in i0..=i1 {
+                        self.s[row + i as usize] += ds;
+                    }
                 }
             }
         }
@@ -309,11 +323,9 @@ impl Ecosystem {
         let s0 = Instant::now();
         let grid = if self.shadow_enabled {
             let mut g = ShadowGrid::new(self.size, MAX_FIELD_HEIGHT, 1.5);
-            for plant_centres in &centres {
-                for (_, c) in plant_centres {
-                    g.deposit(*c);
-                }
-            }
+            // `wood` is the same flattened set of module centres (built above for
+            // occupancy), still in scope — reuse it rather than reflatten.
+            g.deposit_binned(&wood);
             Some(g)
         } else {
             None
