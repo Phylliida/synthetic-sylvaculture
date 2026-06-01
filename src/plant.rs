@@ -45,6 +45,17 @@ const GOLDEN_ANGLE: f32 = 2.399_963_2;
 /// rather than extruding one long straight beam in a single cycle.
 pub(crate) const MAX_SHOOT: u32 = 2;
 
+/// Deterministic pseudo-random value in [0,1) from a module id (splitmix64
+/// finalizer) — lets the monopodial/sympodial bud-fate choice be varied yet
+/// fully reproducible, with no RNG threaded through the plant.
+fn hash01(x: u64) -> f32 {
+    let mut z = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^= z >> 31;
+    ((z >> 40) as f32) / ((1u64 << 24) as f32)
+}
+
 /// A render-ready truncated-cone branch segment in world space.
 #[derive(Clone, Copy, Debug)]
 pub struct Segment {
@@ -175,6 +186,13 @@ struct Internode {
     terminal_bud: bool,
     /// This metamer carries an unspouted axillary (lateral) bud.
     lateral_bud: bool,
+    /// Sympodial relay bud: set on a shoot tip whose terminal bud "flowered" and
+    /// stopped (low determinacy). It continues the axis (SAME order, near-axial)
+    /// as a leader takeover — and is SEPARATE from `lateral_bud`, so the tip
+    /// still makes its normal side branch (no starvation, unlike a single-bud
+    /// relay). Terminal and relay are mutually exclusive; both draw the main
+    /// (apical) resource share, so the relay takes over apical dominance.
+    relay_bud: bool,
     // --- recomputed each cycle ---
     /// Space-and-light availability Q at this metamer's buds (0 if no free
     /// space in the perception cone, else the local light level).
@@ -247,6 +265,7 @@ impl Plant {
             age: 0.0,
             terminal_bud: true,
             lateral_bud: true,
+            relay_bud: false,
             q_bud: 1.0,
             v_grow: Vec3::Y,
             q_acc: 1.0,
@@ -503,7 +522,7 @@ impl Plant {
     /// the growing surface, not the interior).
     fn q_self(&self, id: ModuleId) -> f32 {
         let n = self.node(id);
-        ((n.terminal_bud as u32 + n.lateral_bud as u32) as f32) * n.q_bud
+        ((n.terminal_bud as u32 + n.relay_bud as u32 + n.lateral_bud as u32) as f32) * n.q_bud
     }
 
     // --- 2. basipetal light accumulation -------------------------------------
@@ -565,12 +584,15 @@ impl Plant {
                 }
             }
             let q_bud = self.node(id).q_bud;
-            let has_term = self.node(id).terminal_bud;
+            // The "main" continuation slot is the terminal bud (monopodial) OR a
+            // relay bud (sympodial takeover) — both continue the axis and draw the
+            // apical (λ) share into term_resource.
+            let has_main = self.node(id).terminal_bud || self.node(id).relay_bud;
             let has_lat = self.node(id).lateral_bud;
 
             let main_q = main_child
                 .map(|c| self.node(c).q_acc)
-                .or(if has_term { Some(q_bud) } else { None });
+                .or(if has_main { Some(q_bud) } else { None });
             let lat_q = lat_child
                 .map(|c| self.node(c).q_acc)
                 .or(if has_lat { Some(q_bud) } else { None });
@@ -586,7 +608,7 @@ impl Plant {
 
             match main_child {
                 Some(c) => self.node_mut(c).vigor = main_share,
-                None if has_term => self.node_mut(id).term_resource = main_share,
+                None if has_main => self.node_mut(id).term_resource = main_share,
                 _ => {}
             }
             match lat_child {
@@ -628,6 +650,23 @@ impl Plant {
             if self.module_count() >= p.max_modules {
                 break;
             }
+            // Sympodial relay bud → the terminal flowered, so a lateral takes over
+            // as the continuing leader: SAME order (vigor pass treats it as the
+            // main axis), a small near-axial veer + leader up-righting. Distinct
+            // from the lateral bud below, so the tip still side-branches.
+            let n = self.node(id);
+            if n.relay_bud {
+                let v = n.term_resource; // the main (apical) share
+                if v >= 1.0 {
+                    let order = n.order;
+                    let dir = self.relay_direction(id);
+                    self.node_mut(id).relay_bud = false;
+                    self.sprout(id, dir, order, v, true);
+                }
+            }
+            if self.module_count() >= p.max_modules {
+                break;
+            }
             // Lateral bud → start a new axis (order+1) at a branching angle.
             let n = self.node(id);
             if n.lateral_bud {
@@ -651,6 +690,14 @@ impl Plant {
         let want = v.floor().max(1.0);
         let n = (want as u32).min(MAX_SHOOT);
         let l = (v / want).clamp(1.0, 1.7); // unit-ish internode length
+        // Determinacy → monopodial vs sympodial. High D: the tip keeps a terminal
+        // bud (single dominant leader, monopodial/excurrent). Low D: the terminal
+        // "flowers"/stops and a relay bud takes over (sympodial). The probability
+        // ramps over D∈[0.2,0.6] so clearly excurrent species (D≳0.6) stay
+        // monopodial. The relay is separate from the lateral bud, so the tip still
+        // side-branches (no starvation).
+        let cont_prob = ((p.determinacy - 0.2) / 0.4).clamp(0.0, 1.0);
+        let continues = hash01((parent as u64).wrapping_mul(0x9E37_79B1) ^ order as u64) < cont_prob;
         let mut base = self.node(parent).tip();
         let mut dir = start_dir.normalize_or_zero();
         if dir.length_squared() < 1e-9 {
@@ -678,8 +725,9 @@ impl Plant {
                 order,
                 rank: k,
                 age: 0.0,
-                terminal_bud: k == n - 1,
+                terminal_bud: k == n - 1 && continues,
                 lateral_bud: true,
+                relay_bud: k == n - 1 && !continues,
                 q_bud: 1.0,
                 v_grow: Vec3::ZERO,
                 q_acc: 1.0,
@@ -695,6 +743,27 @@ impl Plant {
             self.node_mut(prev).children.push(new_id);
             prev = new_id;
         }
+    }
+
+    /// Direction of a sympodial relay leader: like the terminal continuation it
+    /// seeks free space (the parent axis blended with the optimal direction V),
+    /// then veers by a small angle around the phyllotactic azimuth — the sympodial
+    /// kink. Seeking space (plus leader up-righting) keeps the relay climbing into
+    /// the open rather than leaning off in one fixed direction, so the trunk is a
+    /// gently zig-zagging sympodium, not a lopsided one.
+    fn relay_direction(&self, id: ModuleId) -> Vec3 {
+        let n = self.node(id);
+        let axis = n.dir.normalize_or_zero();
+        let base = if n.v_grow.length_squared() > 1e-6 {
+            (axis + n.v_grow.normalize_or_zero() * self.params.xi).normalize_or_zero()
+        } else {
+            axis
+        };
+        let angle = 14.0_f32.to_radians();
+        let azimuth = (n.rank as f32) * GOLDEN_ANGLE;
+        let (u, v) = base.any_orthonormal_pair();
+        let radial = (u * azimuth.cos() + v * azimuth.sin()).normalize_or_zero();
+        (base * angle.cos() + radial * angle.sin()).normalize_or_zero()
     }
 
     /// Direction of a metamer's lateral bud: the parent axis tilted by the
