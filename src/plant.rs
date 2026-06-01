@@ -1154,6 +1154,53 @@ pub(crate) enum Occ<'a> {
     Wood(&'a [Vec3]),
 }
 
+/// Find the nearest bud that *perceives* marker `m` (within perception radius,
+/// inside its forward cone, below its reveal ceiling, and within its crown
+/// cylinder), returning that bud's index and the unit direction to the marker.
+/// Pure (no shared state), so it is safe to run across threads.
+fn nearest_bud(
+    m: Vec3,
+    bgrid: &PointGrid,
+    buds: &[BudQuery],
+    per2: f32,
+    pcos: f32,
+) -> Option<(usize, Vec3)> {
+    let mut best: Option<usize> = None;
+    let mut best_dn = Vec3::ZERO;
+    let mut bestd = per2;
+    bgrid.for_near(m, |bi| {
+        let b = &buds[bi];
+        if m.y > b.ceiling {
+            return;
+        }
+        let (hx, hz) = (m.x - b.center.x, m.z - b.center.z);
+        if hx * hx + hz * hz > b.crown_r * b.crown_r {
+            return; // outside this tree's crown cylinder
+        }
+        let d = m - b.pos;
+        let dist2 = d.length_squared();
+        if dist2 > per2 || dist2 < 1e-9 {
+            return;
+        }
+        let dn = d.normalize_or_zero();
+        if dn.dot(b.dir) < pcos {
+            return;
+        }
+        if dist2 < bestd {
+            bestd = dist2;
+            best = Some(bi);
+            best_dn = dn;
+        }
+    });
+    best.map(|bi| (bi, best_dn))
+}
+
+/// How many contiguous marker chunks the shared-field loop is split across for
+/// parallelism. The result is independent of this value: chunks are contiguous
+/// and merged in chunk order, so `sum[bi] += dn` replays in the exact sequential
+/// marker order — bit-identical regardless of chunk count or thread scheduling.
+const COLONIZE_CHUNKS: usize = 16;
+
 pub(crate) fn colonize(
     markers: &mut Vec<Vec3>,
     occ: Occ,
@@ -1173,65 +1220,74 @@ pub(crate) fn colonize(
         Occ::Wood(w) => Some(DenseOcc::build(w, occ_inv, bounds)),
         Occ::Consume => None,
     };
-    let consume = matches!(occ, Occ::Consume);
     let mut sum = vec![Vec3::ZERO; buds.len()];
     let mut has = vec![false; buds.len()];
-    let mut kept = Vec::with_capacity(markers.len());
-    for &m in markers.iter() {
-        let occupied = match &occ {
-            Occ::Wood(_) => wood_occ.as_ref().unwrap().occupied(grid_key(m, occ_inv)),
-            Occ::Consume => {
-                let mut o = false;
+
+    match &occ {
+        // Standalone tree: sequential. Occupancy is a bud-distance test, and free
+        // markers are kept (the dome depletes). Fast already (one small tree).
+        Occ::Consume => {
+            let mut kept = Vec::with_capacity(markers.len());
+            for &m in markers.iter() {
+                let mut occupied = false;
                 bgrid.for_near(m, |bi| {
                     let b = &buds[bi];
-                    if !o && m.y <= b.ceiling && (m - b.pos).length_squared() <= occ2 {
-                        o = true;
+                    if !occupied && m.y <= b.ceiling && (m - b.pos).length_squared() <= occ2 {
+                        occupied = true;
                     }
                 });
-                o
+                if occupied {
+                    continue; // reached → consumed (dropped)
+                }
+                kept.push(m); // free markers persist until reached
+                if let Some((bi, dn)) = nearest_bud(m, &bgrid, buds, per2, pcos) {
+                    sum[bi] += dn;
+                    has[bi] = true;
+                }
             }
-        };
-        if occupied {
-            continue; // Consume: dropped (not kept) → deleted. Wood: persists.
+            *markers = kept;
         }
-        if consume {
-            kept.push(m); // free markers persist until reached
+        // Shared stand: the marker loop is the hot path. Each marker is
+        // independent (occupancy is an O(1) dense-grid lookup, perception is the
+        // pure `nearest_bud`), so split `markers` into contiguous chunks across
+        // threads. Each chunk returns its (bud, direction) assignments in marker
+        // order; merging chunks in order replays `sum[bi] += dn` in the exact
+        // sequential order → bit-identical, independent of thread count.
+        Occ::Wood(_) => {
+            let wood = wood_occ.as_ref().unwrap();
+            let bgrid = &bgrid; // capture by shared ref (Copy) in the move closures
+            let n = markers.len();
+            let n_chunks = COLONIZE_CHUNKS
+                .min(std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1))
+                .max(1);
+            let chunk_size = n.div_ceil(n_chunks).max(1);
+            let parts: Vec<Vec<(usize, Vec3)>> = std::thread::scope(|scope| {
+                let handles: Vec<_> = markers
+                    .chunks(chunk_size)
+                    .map(|chunk| {
+                        scope.spawn(move || {
+                            let mut out: Vec<(usize, Vec3)> = Vec::new();
+                            for &m in chunk {
+                                if wood.occupied(grid_key(m, occ_inv)) {
+                                    continue;
+                                }
+                                if let Some(p) = nearest_bud(m, bgrid, buds, per2, pcos) {
+                                    out.push(p);
+                                }
+                            }
+                            out
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            for part in &parts {
+                for &(bi, dn) in part {
+                    sum[bi] += dn;
+                    has[bi] = true;
+                }
+            }
         }
-        // Perception: associate to the nearest bud that perceives this marker.
-        let mut best: Option<usize> = None;
-        let mut best_dn = Vec3::ZERO;
-        let mut bestd = per2;
-        bgrid.for_near(m, |bi| {
-            let b = &buds[bi];
-            if m.y > b.ceiling {
-                return;
-            }
-            let (hx, hz) = (m.x - b.center.x, m.z - b.center.z);
-            if hx * hx + hz * hz > b.crown_r * b.crown_r {
-                return; // outside this tree's crown cylinder
-            }
-            let d = m - b.pos;
-            let dist2 = d.length_squared();
-            if dist2 > per2 || dist2 < 1e-9 {
-                return;
-            }
-            let dn = d.normalize_or_zero();
-            if dn.dot(b.dir) < pcos {
-                return;
-            }
-            if dist2 < bestd {
-                bestd = dist2;
-                best = Some(bi);
-                best_dn = dn;
-            }
-        });
-        if let Some(bi) = best {
-            sum[bi] += best_dn;
-            has[bi] = true;
-        }
-    }
-    if consume {
-        *markers = kept;
     }
     (0..buds.len()).map(|i| has[i].then(|| sum[i].normalize_or_zero())).collect()
 }
