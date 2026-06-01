@@ -4,7 +4,7 @@
 //! each an independent growth simulation, rendered as one combined mesh.
 //! Global shadowing, seeding, and climate arrive in later stages.
 
-use crate::plant::{colonize, pack, BudQuery, FxMap, ModuleId, Occ, Plant, Segment};
+use crate::plant::{colonize, pack, BudQuery, FxIdMap, FxMap, ModuleId, Occ, Plant, Segment};
 use crate::species::{self, Species};
 
 /// Shared marker field: vertical extent and density (markers per unit volume).
@@ -23,7 +23,6 @@ const CARBON_THRESHOLD: f32 = 0.18;
 use glam::{vec3, Vec3};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use std::collections::HashMap;
 use std::time::Instant;
 
 /// Per-phase wall-clock breakdown of one `Ecosystem::step`, in seconds. The
@@ -310,7 +309,7 @@ impl Ecosystem {
             wood.extend(centres[pi].iter().map(|(_, c)| *c));
         }
         let vs = colonize(&mut self.markers, Occ::Wood(&wood), &buds, OCC_R, PER_R, PER_COS);
-        let mut space: Vec<HashMap<ModuleId, Vec3>> = vec![HashMap::new(); self.plants.len()];
+        let mut space: Vec<FxIdMap<Vec3>> = vec![FxIdMap::default(); self.plants.len()];
         for (i, v) in vs.into_iter().enumerate() {
             if let Some(dir) = v {
                 let (pi, id) = bud_keys[i];
@@ -335,7 +334,7 @@ impl Ecosystem {
         // --- 3. grow each plant in the shared field.
         let g0 = Instant::now();
         for (pi, p) in self.plants.iter_mut().enumerate() {
-            let qg: HashMap<ModuleId, f32> = centres[pi]
+            let qg: FxIdMap<f32> = centres[pi]
                 .iter()
                 .map(|(id, c)| (*id, grid.as_ref().map(|g| g.light_at(*c)).unwrap_or(1.0)))
                 .collect();

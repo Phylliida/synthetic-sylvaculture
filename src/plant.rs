@@ -294,8 +294,8 @@ impl Plant {
     pub fn step_in_field(
         &mut self,
         dt: f32,
-        qg: &HashMap<ModuleId, f32>,
-        space: &HashMap<ModuleId, Vec3>,
+        qg: &FxIdMap<f32>,
+        space: &FxIdMap<Vec3>,
     ) {
         self.step_impl(dt, Some(qg), Some(space));
     }
@@ -303,8 +303,8 @@ impl Plant {
     fn step_impl(
         &mut self,
         dt: f32,
-        qg: Option<&HashMap<ModuleId, f32>>,
-        space: Option<&HashMap<ModuleId, Vec3>>,
+        qg: Option<&FxIdMap<f32>>,
+        space: Option<&FxIdMap<Vec3>>,
     ) {
         self.age += dt;
         for id in self.alive_ids() {
@@ -335,15 +335,15 @@ impl Plant {
     // no free space gets Q=0 and stops (bounding the leader, filling the crown).
     fn environment(
         &mut self,
-        qg: Option<&HashMap<ModuleId, f32>>,
-        space: Option<&HashMap<ModuleId, Vec3>>,
+        qg: Option<&FxIdMap<f32>>,
+        space: Option<&FxIdMap<Vec3>>,
     ) {
         let stol = self.params.shade_tolerance;
         let ids = self.alive_ids();
 
         // Growth-direction V per module: supplied (shared field) or self-colonized.
         let local_space;
-        let space_map: &HashMap<ModuleId, Vec3> = match space {
+        let space_map: &FxIdMap<Vec3> = match space {
             Some(s) => s,
             None => {
                 local_space = self.colonize_self();
@@ -400,7 +400,7 @@ impl Plant {
 
     /// Colonize the plant's OWN private marker dome (standalone mode), consuming
     /// reached markers; returns the per-module growth direction V.
-    fn colonize_self(&mut self) -> HashMap<ModuleId, Vec3> {
+    fn colonize_self(&mut self) -> FxIdMap<Vec3> {
         let p = self.params.clone();
         let ceiling = self.reveal_ceiling();
         let crown_r = p.envelope_radius + p.internode_len;
@@ -418,7 +418,7 @@ impl Plant {
             p.perception_radius,
             p.perception_cos,
         );
-        let mut out = HashMap::new();
+        let mut out = FxIdMap::default();
         for (i, v) in vs.into_iter().enumerate() {
             if let Some(dir) = v {
                 out.insert(active[i].0, dir);
@@ -432,7 +432,7 @@ impl Plant {
     /// (Pałubicki §4.1 shadow propagation; g = max(C − s + a, 0)/C, the +a
     /// cancels a tip's self-shadow). Lower/interior tips sit under more shadow,
     /// so they get less light → shed and self-thin like a forest tree.
-    fn self_shadow(&self) -> HashMap<ModuleId, f32> {
+    fn self_shadow(&self) -> FxIdMap<f32> {
         let cell = (self.params.internode_len * 2.0).max(0.5);
         let inv = 1.0 / cell;
         // Gentle: a shallow penumbra (small qmax) and a high full-exposure
@@ -456,7 +456,7 @@ impl Plant {
                 }
             }
         }
-        let mut out = HashMap::new();
+        let mut out = FxIdMap::default();
         for &id in &ids {
             let sv = s.get(&key(self.node(id).tip())).copied().unwrap_or(0.0);
             out.insert(id, ((c - sv + a).max(0.0) / c).clamp(0.0, 1.0));
@@ -675,19 +675,23 @@ impl Plant {
             return;
         }
         // Subtree internode count and summed current light (post-order); the
-        // ratio light/size is the branch's mean light level.
+        // ratio light/size is the branch's mean light level. Indexed by id (a
+        // dense slot index) — post-order visits children before parents, so a
+        // child's entry is always set before its parent reads it.
         let order = self.post_order(self.root);
-        let mut size: HashMap<ModuleId, u32> = HashMap::new();
-        let mut light: HashMap<ModuleId, f32> = HashMap::new();
+        let mut size: Vec<u32> = vec![0; self.nodes.len()];
+        let mut light: Vec<f32> = vec![0.0; self.nodes.len()];
         for &id in &order {
             let mut s = 1u32;
             let mut lt = self.node(id).light_level;
-            for &c in &self.node(id).children {
-                s += size.get(&c).copied().unwrap_or(0);
-                lt += light.get(&c).copied().unwrap_or(0.0);
+            let nc = self.node(id).children.len();
+            for ci in 0..nc {
+                let c = self.node(id).children[ci];
+                s += size[c];
+                lt += light[c];
             }
-            size.insert(id, s);
-            light.insert(id, lt);
+            size[id] = s;
+            light[id] = lt;
         }
         // Candidates: the base of a lateral axis (parent of lower order), old
         // enough to have had a fair chance to gather. Never the trunk (order 0).
@@ -701,7 +705,7 @@ impl Plant {
             if !is_axis_base {
                 continue;
             }
-            if light[&id] / (size[&id] as f32) < p.shed_ratio {
+            if light[id] / (size[id] as f32) < p.shed_ratio {
                 to_shed.push(id);
             }
         }
@@ -992,8 +996,16 @@ impl std::hash::Hasher for FxHasher {
     fn write_u64(&mut self, i: u64) {
         self.h = (self.h.rotate_left(5) ^ i).wrapping_mul(FX_K);
     }
+    // Integer-key shortcuts so usize/u32 keys (module ids) don't fall through to
+    // the byte-loop fallback below.
+    fn write_usize(&mut self, i: usize) {
+        self.write_u64(i as u64);
+    }
+    fn write_u32(&mut self, i: u32) {
+        self.write_u64(i as u64);
+    }
     fn write(&mut self, bytes: &[u8]) {
-        // Generic fallback (unused on our u64 keys, but keep it correct).
+        // Generic fallback (unused on our integer keys, but keep it correct).
         for &b in bytes {
             self.write_u64(b as u64);
         }
@@ -1002,6 +1014,8 @@ impl std::hash::Hasher for FxHasher {
 pub(crate) type BuildFx = std::hash::BuildHasherDefault<FxHasher>;
 pub(crate) type FxMap<V> = HashMap<u64, V, BuildFx>;
 type FxSet = HashSet<u64, BuildFx>;
+/// Module-id-keyed map with the fast hasher (for per-plant `qg`/`space`/shed).
+pub(crate) type FxIdMap<V> = HashMap<ModuleId, V, BuildFx>;
 
 /// Pack a voxel coordinate triple into a single `u64` key (21 bits each, with a
 /// +2^20 offset so the range is [-2^20, 2^20) per axis — far beyond any plot).
