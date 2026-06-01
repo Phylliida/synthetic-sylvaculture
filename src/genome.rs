@@ -140,6 +140,20 @@ impl Genome {
         Genome::from_array(a)
     }
 
+    /// Ecological niche descriptor, each axis normalized to [0,1]: crown height,
+    /// crown breadth, shade strategy — the axes along which plants overlap in how
+    /// they use light and space. Two plants close here occupy the same niche and
+    /// so compete most (used for negative frequency-dependence; also a natural
+    /// quality-diversity "behavior characterization").
+    pub fn niche(&self) -> [f32; 3] {
+        let n = |v: f32, lo: f32, hi: f32| ((v - lo) / (hi - lo)).clamp(0.0, 1.0);
+        [
+            n(self.envelope_height, 4.0, 30.0),
+            n(self.envelope_radius, 2.0, 8.0),
+            n(self.shade_tolerance, 0.0, 0.8),
+        ]
+    }
+
     /// Build the runtime `PlantParams` this genome expresses. The marker budget
     /// and module cap are *derived* from the crown volume, so a bigger-envelope
     /// genome automatically gets the budget to fill it (and a small one stays

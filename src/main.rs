@@ -107,7 +107,7 @@ fn run_stats() {
 
     println!("\necosystem: EVOLUTION (temperate, mean genome over time from random founders):");
     {
-        let mut eco = Ecosystem::new(30, 13.0, 4, temperate);
+        let mut eco = Ecosystem::new(50, 19.0, 4, temperate);
         for s in 1..=500 {
             eco.step(1.0);
             if [1, 150, 320, 500].contains(&s) {
@@ -131,20 +131,25 @@ fn run_stats() {
         Climate { temp: 12.0, precip: 110.0 },
         Climate { temp: 26.0, precip: 300.0 },
     ] {
-        let mut eco = Ecosystem::new(36, 13.0, 9, clim);
+        let mut eco = Ecosystem::new(60, 19.0, 9, clim);
         for _ in 0..450 {
             eco.step(1.0);
         }
         let traits = eco.mean_traits().map(|m| key(&m)).unwrap_or_else(|| "(nothing established — too harsh)".into());
+        let spread = eco
+            .trait_std()
+            .map(|s| format!("diversity: env_h σ {:.1}  shade σ {:.2}  life σ {:>4.0}", s[11], s[9], s[16]))
+            .unwrap_or_default();
         println!(
-            "  T={:>4.0}°C P={:>3.0}cm (prod {:.2})  {:<26}  established {:>3}/{:>3}\n      {}",
+            "  T={:>4.0}°C P={:>3.0}cm (prod {:.2})  {:<26}  established {:>3}/{:>3}\n      {}\n      {}",
             clim.temp,
             clim.precip,
             clim.productivity(),
             biome_name(clim.temp, clim.precip),
             eco.established_count(),
             eco.plant_count(),
-            traits
+            traits,
+            spread
         );
     }
 

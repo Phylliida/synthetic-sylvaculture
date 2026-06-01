@@ -36,6 +36,15 @@ const SEED_RAIN: usize = 10;
 /// pressure + diversity, and lets a bare plot keep attempting to recolonize.
 /// Small, so it doesn't dilute local adaptation (the misfits mostly die young).
 const IMMIGRANT_FRAC: f32 = 0.1;
+/// Negative frequency-dependence (Janzen–Connell / the ecological twin of GA
+/// fitness-sharing): a plant crowded by NEAR and NICHE-SIMILAR neighbours dies
+/// faster, so a locally common strategy is held back and rarer ones invade the
+/// gaps — many strategies coexist instead of one winner. Without it, survival
+/// selection alone collapses each climate onto a single optimum.
+const JC_RADIUS: f32 = 8.0; // only neighbours within this distance compete
+const JC_NICHE_SIGMA: f32 = 0.30; // only neighbours closer than this in niche space
+const JC_MAX: f32 = 0.10; // max per-step death probability under heavy crowding
+const JC_HALF: f32 = 3.5; // crowding at which the death probability is half-max
 /// Plant-parallel grow: the per-plant growth cycles are independent (each reads
 /// its own qg/space and the read-only shared centres/grid, mutates only itself),
 /// so they run across this many contiguous plant chunks on scoped threads.
@@ -257,7 +266,7 @@ impl Ecosystem {
             seeding_enabled: true,
             climate,
             mutation_rate: 0.08,
-            max_plants: 170,
+            max_plants: 280,
             markers: Vec::new(),
             rng,
         };
@@ -451,25 +460,64 @@ impl Ecosystem {
         (maint / p).clamp(0.02, 0.97)
     }
 
-    /// Remove plants that die, opening gaps (Sec. 4.2): old age (senescence), or
-    /// **carbon starvation** — an established plant whose smoothed crown-light has
-    /// fallen below its `survival_bar` (too small a crown to pay upkeep at this
-    /// productivity, or overtopped). Death opens space and sharpens succession.
+    /// Per-plant similar-neighbour crowding for negative frequency-dependence:
+    /// the distance- and niche-similarity-weighted count of neighbours (a plant
+    /// alone scores 0; one surrounded by close, niche-similar plants scores
+    /// high). O(n²) over the ≤cap plants — cheap. This is the ecological twin of
+    /// quality-diversity local competition: similar competitors penalize each
+    /// other, so rare / novel strategies are protected and diversity is kept.
+    fn similar_crowding(&self) -> Vec<f32> {
+        let n = self.plants.len();
+        let niches: Vec<[f32; 3]> = self.genomes.iter().map(|g| g.niche()).collect();
+        let pos: Vec<Vec3> = self.plants.iter().map(|p| p.origin).collect();
+        let mut crowd = vec![0.0f32; n];
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let (dx, dz) = (pos[i].x - pos[j].x, pos[i].z - pos[j].z);
+                let d = (dx * dx + dz * dz).sqrt();
+                if d >= JC_RADIUS {
+                    continue;
+                }
+                let (a, b) = (niches[i], niches[j]);
+                let nd = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+                if nd >= JC_NICHE_SIGMA {
+                    continue;
+                }
+                let w = (1.0 - d / JC_RADIUS) * (1.0 - nd / JC_NICHE_SIGMA);
+                crowd[i] += w;
+                crowd[j] += w;
+            }
+        }
+        crowd
+    }
+
+    /// Remove plants that die, opening gaps (Sec. 4.2): old age (senescence),
+    /// **carbon starvation** (crown too small to pay upkeep at this productivity,
+    /// or overtopped — this is what makes climate select morphology), or
+    /// **Janzen–Connell** death (crowded by niche-similar neighbours — negative
+    /// frequency-dependence that protects rare types and maintains diversity).
     fn cull_dead(&mut self) {
-        // Carbon balance with climate: survive only if income (light) covers
-        // upkeep, i.e. `health · P ≥ cost`, so the survival light bar is
-        // `CARBON_THRESHOLD / P`. Rich climate → low bar → tall dense canopy
-        // viable; poor climate → high bar → only small, well-lit forms break
-        // even (sparse scrub). This — not any niche — makes climate select
-        // morphology.
-        let dead: Vec<bool> = self
+        let crowd = self.similar_crowding();
+        // Pass 1 (immutable): senescence + starvation + each plant's crowding.
+        let info: Vec<(bool, bool, f32)> = self
             .plants
             .iter()
-            .map(|pl| {
+            .enumerate()
+            .map(|(i, pl)| {
                 let bar = self.survival_bar(&pl.params);
                 let senesced = pl.age >= 1.9 * pl.params.p_max;
                 let starved = pl.age > CARBON_ESTABLISH && pl.health() < bar;
-                senesced || starved
+                (senesced, starved, crowd[i])
+            })
+            .collect();
+        // Pass 2 (needs rng): fold in the probabilistic Janzen–Connell mortality,
+        // saturating with crowding. It acts at ALL ages, so it also limits
+        // recruitment of common types near their own kind (true J–C).
+        let dead: Vec<bool> = info
+            .iter()
+            .map(|&(senesced, starved, c)| {
+                let p_jc = JC_MAX * c / (c + JC_HALF);
+                senesced || starved || self.rng.gen::<f32>() < p_jc
             })
             .collect();
         let mut i = 0;
@@ -562,6 +610,42 @@ impl Ecosystem {
     /// established count is the standing adapted community.
     pub fn established_count(&self) -> usize {
         self.plants.iter().filter(|p| p.age > CARBON_ESTABLISH).count()
+    }
+
+    /// Std-dev of each genome trait over the **established** plants — the spread
+    /// is a diversity measure: a converged monoculture has near-zero spread, a
+    /// diverse community a wide one. `None` when fewer than two have established.
+    pub fn trait_std(&self) -> Option<[f32; 17]> {
+        let est: Vec<[f32; 17]> = self
+            .plants
+            .iter()
+            .zip(&self.genomes)
+            .filter(|(p, _)| p.age > CARBON_ESTABLISH)
+            .map(|(_, g)| g.traits())
+            .collect();
+        if est.len() < 2 {
+            return None;
+        }
+        let n = est.len() as f32;
+        let mut mean = [0.0f32; 17];
+        for t in &est {
+            for k in 0..17 {
+                mean[k] += t[k];
+            }
+        }
+        for v in &mut mean {
+            *v /= n;
+        }
+        let mut var = [0.0f32; 17];
+        for t in &est {
+            for k in 0..17 {
+                var[k] += (t[k] - mean[k]).powi(2);
+            }
+        }
+        for v in &mut var {
+            *v = (*v / n).sqrt();
+        }
+        Some(var)
     }
 
     /// Mean of each genome trait over the **established** plants (field order;
