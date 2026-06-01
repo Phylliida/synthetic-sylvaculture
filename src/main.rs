@@ -123,13 +123,14 @@ fn run_stats() {
         }
     }
 
-    println!("\necosystem: SPECIALIZATION across climates (evolved mean genome, 450 steps each):");
-    println!("  (same random founders + seed; only the climate differs ⇒ divergence is selection)");
+    println!("\necosystem: 2D SPECIALIZATION — the four Whittaker corners (evolved mean, 450 steps):");
+    println!("  (same random founders + seed; temp & precip stress different traits, so the");
+    println!("   corners diverge in KIND — cold→narrow, warm→broad; dry→small, wet→large)");
     for clim in [
-        Climate { temp: -3.0, precip: 40.0 },
-        Climate { temp: 5.0, precip: 90.0 },
-        Climate { temp: 12.0, precip: 110.0 },
-        Climate { temp: 26.0, precip: 300.0 },
+        Climate { temp: -2.0, precip: 30.0 },  // cold-dry
+        Climate { temp: 3.0, precip: 220.0 },  // cold-wet
+        Climate { temp: 25.0, precip: 35.0 },  // warm-dry
+        Climate { temp: 26.0, precip: 320.0 }, // warm-wet
     ] {
         let mut eco = Ecosystem::new(60, 19.0, 9, clim);
         for _ in 0..450 {
@@ -138,13 +139,14 @@ fn run_stats() {
         let traits = eco.mean_traits().map(|m| key(&m)).unwrap_or_else(|| "(nothing established — too harsh)".into());
         let spread = eco
             .trait_std()
-            .map(|s| format!("diversity: env_h σ {:.1}  shade σ {:.2}  life σ {:>4.0}", s[11], s[9], s[16]))
+            .map(|s| format!("diversity: env_h σ {:.1}  env_r σ {:.1}  shade σ {:.2}", s[11], s[12], s[9]))
             .unwrap_or_default();
         println!(
-            "  T={:>4.0}°C P={:>3.0}cm (prod {:.2})  {:<26}  established {:>3}/{:>3}\n      {}\n      {}",
+            "  T={:>4.0}°C P={:>3.0}cm (warm {:.2} water {:.2})  {:<24}  est {:>3}/{:>3}\n      {}\n      {}",
             clim.temp,
             clim.precip,
-            clim.productivity(),
+            clim.warmth(),
+            clim.water(),
             biome_name(clim.temp, clim.precip),
             eco.established_count(),
             eco.plant_count(),

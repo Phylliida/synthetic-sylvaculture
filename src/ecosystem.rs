@@ -21,12 +21,21 @@ const PER_COS: f32 = 0.3;
 /// even where productivity P is high, regardless of crowding. This is what makes
 /// climate select morphology robustly (not just under competition).
 const CARBON_ESTABLISH: f32 = 30.0;
-/// Baseline upkeep light (even a tiny plant must capture this × 1/P).
+/// Baseline upkeep light every plant must capture.
 const MAINT_BASE: f32 = 0.06;
-/// Extra upkeep a full-size crown demands (∝ crown volume) — the size cost.
-const MAINT_SIZE: f32 = 0.22;
-/// Crown volume that counts as "full size" for normalizing the size cost.
+/// Crown-VOLUME upkeep at full size, divided by the water factor — so a big
+/// crown (leaf area) is cheap where it's wet and ruinous where it's dry. This is
+/// the precipitation axis: dry ⇒ small/sparse crowns.
+const MAINT_VOL: f32 = 0.30;
+/// Crown volume that counts as "full size" for normalizing the volume cost.
 const MAINT_FULL_VOL: f32 = 2200.0;
+/// Crown-BREADTH term, scaled by (1 − 2·warmth) so it SWINGS sign with warmth:
+/// in the cold it is a cost (→ narrow, conical crowns: snow / low sun / wind), in
+/// the warm it is a discount (broad crowns intercept light efficiently where it
+/// isn't limiting → broadleaf). Combined with the volume cost ÷ water (which
+/// still forbids broad crowns in the dry), this gives the temperature axis:
+/// cold ⇒ narrow, warm+wet ⇒ broad, warm+dry ⇒ narrow.
+const MAINT_BREADTH: f32 = 0.40;
 /// Seed rain: establishment attempts scattered across the whole floor each step
 /// (on top of local seeding), so gaps are colonized the moment they open and the
 /// floor is always carpeted with seedlings trying to take hold. Bounded by the
@@ -215,19 +224,29 @@ pub struct Climate {
 }
 
 impl Climate {
-    /// Physical productivity `P ∈ [0,1]`: how much carbon this environment can
-    /// make. Rises monotonically and saturates with both warmth and water (this
-    /// is the Whittaker net-primary-productivity gradient). NOT a per-genome
-    /// niche and NOT peaked at any optimum — every plant feels the same `P`. It
-    /// is the ONLY way climate touches the simulation: it scales growth
-    /// (`v_root_max *= P`) and the carbon-starvation survival bar
-    /// (`health < THRESHOLD / P`). Specialization to a biome therefore emerges
-    /// purely from which morphologies break even / out-compete at this `P`.
+    /// Warmth factor ∈ [0,1] (logistic in temperature): ~0 below freezing, ~1
+    /// when warm. Governs growth RATE (season length) and penalizes crown
+    /// BREADTH (cold favours narrow, conical crowns). One of the two orthogonal
+    /// axes by which climate selects morphology — NOT a per-genome niche.
+    pub fn warmth(&self) -> f32 {
+        (1.0 / (1.0 + (-(self.temp - 6.0) / 5.0).exp())).clamp(0.0, 1.0)
+    }
+
+    /// Water factor ∈ [0,1] (logistic in precipitation): ~0 arid, ~1 wet.
+    /// Governs how much crown VOLUME (leaf area) the environment can support —
+    /// dry climates make large crowns expensive. The other orthogonal axis.
+    pub fn water(&self) -> f32 {
+        (1.0 / (1.0 + (-(self.precip - 65.0) / 28.0).exp())).clamp(0.0, 1.0)
+    }
+
+    /// Whittaker net-primary-productivity (warmth × water) — the scalar
+    /// magnitude of the climate, kept for display / coarse reporting. The two
+    /// factors act on DIFFERENT traits (see `warmth`/`water`), so two climates
+    /// with equal productivity can still select different morphologies (the
+    /// point of the 2D axis).
+    #[allow(dead_code)]
     pub fn productivity(&self) -> f32 {
-        // Logistic in each axis: ~0 when cold/dry, ~1 when warm/wet.
-        let warmth = 1.0 / (1.0 + (-(self.temp - 6.0) / 5.0).exp());
-        let water = 1.0 / (1.0 + (-(self.precip - 65.0) / 28.0).exp());
-        (warmth * water).clamp(0.0, 1.0)
+        self.warmth() * self.water()
     }
 }
 
@@ -318,9 +337,12 @@ impl Ecosystem {
     /// per-genome niche). Its private marker dome is cleared — in the ecosystem
     /// it grows in the shared field instead.
     fn make_plant_from_genome(&self, g: &Genome, pos: Vec3) -> Plant {
-        let p = self.climate.productivity();
         let mut params = g.to_params();
-        params.v_root_max *= p.max(0.12); // growth budget scales with productivity
+        // Growth RATE scales with warmth (season length): cold climates grow
+        // slowly, so a cold-adapted plant reaches its (genome) size only over a
+        // long life. Crown SIZE is limited separately, by the climate-stressed
+        // survival bar — keeping the two climate axes on different traits.
+        params.gp *= 0.30 + 0.70 * self.climate.warmth();
         let mut plant = Plant::new(params, pos);
         plant.clear_markers();
         plant
@@ -443,21 +465,33 @@ impl Ecosystem {
     }
 
     /// The minimum smoothed crown-light a plant of these traits must hold to pay
-    /// its upkeep here. Income is `P · health`; maintenance = base + a size cost
-    /// (∝ crown volume, an intrinsic wood-respiration cost), reduced by shade
-    /// tolerance (cheap, durable leaves). Survive iff `P · health ≥ maintenance`,
-    /// i.e. `health ≥ maintenance / P`. Because the size cost is intrinsic (not
-    /// competition-driven), a big crown only breaks even at high productivity —
-    /// so climate selects size robustly, even in a sparse stand.
+    /// its upkeep in this climate. Maintenance has TWO climate-stressed terms on
+    /// DIFFERENT traits, which is what makes the 2D climate space differentiate:
+    ///   • crown VOLUME cost ÷ water  — dry penalizes big crowns (→ small/sparse),
+    ///   • crown BREADTH cost × coldness — cold penalizes broad crowns (→ narrow).
+    /// Shade tolerance lowers the whole bar (cheap, durable leaves) but costs
+    /// growth. Survive iff smoothed crown-light `health ≥ bar`. Climate is in the
+    /// physics, not the genome — morphology specializes purely by selection.
     fn survival_bar(&self, params: &PlantParams) -> f32 {
-        let p = self.climate.productivity().max(0.05);
+        let (warmth, water) = (self.climate.warmth(), self.climate.water());
+        // Liveability floor: how harsh the climate is for ANY plant. Scales with
+        // overall productivity (warmth × water), so the harsh corners (tundra /
+        // desert) are barren and the lush ones support dense stands — the
+        // Whittaker productivity gradient. The 2D shape terms ride on top.
+        let prod = (warmth * water).max(0.04);
+        let live = MAINT_BASE / prod;
         let vol = std::f32::consts::PI
             * params.envelope_radius
             * params.envelope_radius
             * params.envelope_height;
-        let size = (vol / MAINT_FULL_VOL).clamp(0.0, 1.1);
-        let maint = (MAINT_BASE + MAINT_SIZE * size) * (1.0 - 0.5 * params.shade_tolerance);
-        (maint / p).clamp(0.02, 0.97)
+        let vol_norm = (vol / MAINT_FULL_VOL).clamp(0.0, 1.2);
+        let breadth_norm = ((params.envelope_radius - 2.0) / 6.0).clamp(0.0, 1.0);
+        // Water limits affordable crown volume; warmth flips breadth cost→benefit
+        // (cold narrows, warm broadens — but only where water affords the volume).
+        let vol_term = MAINT_VOL * vol_norm / water.max(0.08);
+        let breadth_term = MAINT_BREADTH * breadth_norm * (1.0 - 2.0 * warmth);
+        let bar = (live + vol_term + breadth_term) * (1.0 - 0.5 * params.shade_tolerance);
+        bar.clamp(0.02, 0.97)
     }
 
     /// Per-plant similar-neighbour crowding for negative frequency-dependence:
@@ -769,32 +803,52 @@ mod tests {
     }
 
     #[test]
-    fn climate_selects_taller_crowns_where_productive() {
-        // The headline emergent property: there is NO hardcoded climate niche —
-        // a productive (warm, wet) climate must evolve a taller mean crown than a
-        // poor (cold, dry) one. Specialization is pure selection on the carbon
-        // tradeoff (crown light self-shades, so a big crown only pays its way at
-        // high productivity). The established cohort is small ⇒ per-run noisy, so
-        // average the evolved mean crown height (env_h) over several seeds.
-        let mean_env_h = |climate: Climate| -> f32 {
-            let seeds = [1u64, 2, 3, 4];
-            let hs: Vec<f32> = seeds
+    fn climate_specializes_on_two_axes() {
+        // The 2D headline: there is NO hardcoded niche, yet temperature and
+        // precipitation stress DIFFERENT traits, so the climate space
+        // differentiates morphology by selection alone. Established cohorts are
+        // small ⇒ per-run noisy, so average the evolved mean over several seeds.
+        let mean = |climate: Climate, idx: usize| -> f32 {
+            let seeds = [1u64, 2, 3];
+            let vs: Vec<f32> = seeds
                 .iter()
                 .filter_map(|&sd| {
-                    let mut eco = Ecosystem::new(36, 13.0, sd, climate);
-                    for _ in 0..340 {
+                    let mut eco = Ecosystem::new(55, 17.0, sd, climate);
+                    for _ in 0..320 {
                         eco.step(1.0);
                     }
-                    eco.mean_traits().map(|m| m[11]) // env_h
+                    eco.mean_traits().map(|m| m[idx])
                 })
                 .collect();
-            hs.iter().sum::<f32>() / hs.len().max(1) as f32
+            vs.iter().sum::<f32>() / vs.len().max(1) as f32
         };
-        let poor = mean_env_h(Climate { temp: 5.0, precip: 80.0 });
-        let rich = mean_env_h(Climate { temp: 24.0, precip: 280.0 });
+        // Temperature axis (at high water): warm evolves BROADER crowns than cold
+        // (broadleaf vs conifer) — the breadth/env_r index is 12.
+        let warm_r = mean(Climate { temp: 25.0, precip: 280.0 }, 12);
+        let cold_r = mean(Climate { temp: 3.0, precip: 230.0 }, 12);
         assert!(
-            rich > poor + 2.0,
-            "productive climate should evolve taller crowns (avg over seeds): rich env_h {rich:.1} vs poor {poor:.1}"
+            warm_r > cold_r + 0.8,
+            "warm climate should evolve broader crowns than cold: warm env_r {warm_r:.1} vs cold {cold_r:.1}"
+        );
+        // Water axis (at warmth): wet supports a larger established community than
+        // dry (lush forest vs sparse scrub).
+        let wet_n = {
+            let mut eco = Ecosystem::new(55, 17.0, 1, Climate { temp: 24.0, precip: 300.0 });
+            for _ in 0..320 {
+                eco.step(1.0);
+            }
+            eco.established_count()
+        };
+        let dry_n = {
+            let mut eco = Ecosystem::new(55, 17.0, 1, Climate { temp: 24.0, precip: 35.0 });
+            for _ in 0..320 {
+                eco.step(1.0);
+            }
+            eco.established_count()
+        };
+        assert!(
+            wet_n > dry_n,
+            "wet climate should support more established plants than dry: wet {wet_n} vs dry {dry_n}"
         );
     }
 
