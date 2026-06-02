@@ -870,7 +870,12 @@ impl Plant {
                 }
                 sum.sqrt().max(phi)
             };
-            self.node_mut(id).diam = d;
+            // Pipe model has a MEMORY of past pipes (Pałubicki §4.4): "branch
+            // width is not decreased when leaves and branches are shed or pruned."
+            // So diameter is monotonic non-decreasing — a cleaned bole keeps the
+            // girth it grew when it still carried the now-shed crown.
+            let prev = self.node(id).diam;
+            self.node_mut(id).diam = d.max(prev);
         }
     }
 
@@ -1578,24 +1583,27 @@ mod tests {
 
     #[test]
     fn pipe_model_diameter_is_the_quadratic_sum_of_children() {
-        // Eq. 8: an internode's diameter is √(Σ d_child²), floored at φ; a tip
-        // sits exactly at φ.
+        // Eq. 8: an internode's diameter is √(Σ d_child²), floored at φ. The pipe
+        // model has a MEMORY (Pałubicki §4.4: width never decreases when branches
+        // are shed), so the invariant is diam ≥ √(Σ d_child²) ≥ φ — with equality
+        // for any node that has not had a child shed.
         let plant = grow(0.55, 50);
         let phi = plant.params.phi;
         for id in plant.alive_ids() {
             let n = plant.node(id);
-            if n.children.is_empty() {
-                assert!((n.diam - phi).abs() < 1e-4, "tip {id} diam {} != φ", n.diam);
-            } else {
-                let expect = n
-                    .children
-                    .iter()
-                    .map(|&c| plant.node(c).diam.powi(2))
-                    .sum::<f32>()
-                    .sqrt()
-                    .max(phi);
-                assert!((n.diam - expect).abs() < 1e-3, "node {id} diam {} != {expect}", n.diam);
-            }
+            assert!(n.diam >= phi - 1e-4, "node {id} diam {} below φ {phi}", n.diam);
+            let pipe = n
+                .children
+                .iter()
+                .map(|&c| plant.node(c).diam.powi(2))
+                .sum::<f32>()
+                .sqrt()
+                .max(phi);
+            assert!(
+                n.diam >= pipe - 1e-3,
+                "node {id} diam {} < pipe-model √Σd² {pipe}",
+                n.diam
+            );
         }
     }
 
