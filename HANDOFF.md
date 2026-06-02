@@ -227,7 +227,7 @@ it was never told:
   **≈ 0.51** (predicted 0.50; diameter ∝ √leaves). Holds.
 - **Self-thinning** (Yoda's −3/2 law): a dense even-aged **monoculture**
   (`Ecosystem::monoculture`, seeding off) thins while mean biomass rises (the
-  right *sign*), but the slope is currently **≈ −0.95**, *shallower* than the
+  right *sign*), but the slope is currently **≈ −1.13**, *shallower* than the
   ideal −1.5. Honest reason: our **crown envelopes are fixed per genome**, so a
   survivor can't expand into a dead neighbour's freed space — its biomass caps at
   its envelope, so the stand doesn't gain enough biomass as it thins.
@@ -341,7 +341,7 @@ What to tune:
    `--tree` a *somewhat unreliable* tuning instrument — judge species character,
    not perfect symmetry. In the ecosystem (`Wood` mode, all-sides competition)
    trees are more balanced.
-4. **Self-thinning is ≈ −0.95, not −1.5** — fixed crown envelopes don't expand
+4. **Self-thinning is ≈ −1.13, not −1.5** — fixed crown envelopes don't expand
    into freed space (see Validation). A real residual, not a bug.
 5. **Parameter fragility** — see the Rigor caveat above. Many eye-tuned constants;
    the emergent ecosystem can shift with any of them. Re-run `--stats` after edits.
@@ -365,7 +365,7 @@ What to tune:
   real frame time first.
 - **Space-responsive envelopes** — let a survivor's crown envelope expand into a
   dead neighbour's freed space; this is what would steepen self-thinning toward
-  the −1.5 ideal (currently capped at the fixed envelope → ≈ −0.95).
+  the −1.5 ideal (fixed envelopes cap it at ≈ −1.13).
 - **Terrain + elevation lapse rate** `T(h)=T(0)+γh` → **treelines** (Makowski
   Sec. 6.4). The biggest remaining paper feature and a clean fit (climate is
   already mechanistic). Plus a **soil/blocked map** (exclude water/rock/roads).
