@@ -54,6 +54,19 @@ const JC_RADIUS: f32 = 8.0; // only neighbours within this distance compete
 const JC_NICHE_SIGMA: f32 = 0.30; // only neighbours closer than this in niche space
 const JC_MAX: f32 = 0.10; // max per-step death probability under heavy crowding
 const JC_HALF: f32 = 3.5; // crowding at which the death probability is half-max
+/// Clonal / vegetative spread (the shrub strategy). A basitonic, established
+/// plant puts up root-suckers nearby — a near-clone of its genome — WITHOUT
+/// needing to flower, so a basitonic understory shrub can persist and form a
+/// thicket in the shade where it can't reach flowering light (real clonal
+/// shrubs: hazel, sumac, aspen). Keyed on `basitony` only — it does NOT touch
+/// the flowering/tolerance machinery (which a marginal biome is sensitive to);
+/// it just gives the shrub guild a foothold under the canopy. Per-step clone
+/// probability is `CLONE_FREQ · basitony`; suckers land within `CLONE_RADIUS`
+/// (a tight clump, so clones form a thicket, not scatter).
+const CLONE_FREQ: f32 = 0.03;
+const CLONE_RADIUS: f32 = 3.0;
+/// Only a sufficiently basitonic plant suckers (a tree doesn't coppice-spread).
+const CLONE_BASITONY_MIN: f32 = 0.25;
 /// Minimum crown-light to FLOWER (reproduce), independent of shade tolerance.
 /// Tolerance lets a plant SURVIVE deep shade but not breed there — a suppressed
 /// understory plant must reach real light (a gap, or the canopy) to set seed.
@@ -665,6 +678,37 @@ impl Ecosystem {
             }
         }
         for (g, pos) in newborns {
+            let plant = self.make_plant_from_genome(&g, pos);
+            self.plants.push(plant);
+            self.genomes.push(g);
+        }
+
+        // Clonal / vegetative spread (the shrub strategy — see CLONE_FREQ). A
+        // basitonic, established plant suckers a near-clone nearby WITHOUT needing
+        // flowering light, so a basitonic understory shrub persists and forms a
+        // thicket in shade. Keyed on basitony only (not light/tolerance), so it
+        // gives the shrub guild a foothold without perturbing the flowering rule.
+        // Suckers are near-clones (a quarter the seed mutation) landing in a tight
+        // clump; bounded by the plant cap like seeding.
+        let mut clones: Vec<(Genome, Vec3)> = Vec::new();
+        for (age, _health, _rv, g, origin) in &parents {
+            if self.plants.len() + clones.len() >= self.max_plants {
+                break;
+            }
+            if *age < CARBON_ESTABLISH || g.basitony < CLONE_BASITONY_MIN {
+                continue;
+            }
+            if self.rng.gen::<f32>() < CLONE_FREQ * g.basitony * dt {
+                let ang = self.rng.gen::<f32>() * std::f32::consts::TAU;
+                let r = CLONE_RADIUS * self.rng.gen::<f32>().sqrt(); // tight clump
+                let x = (origin.x + ang.cos() * r).clamp(-self.size, self.size);
+                let z = (origin.z + ang.sin() * r).clamp(-self.size, self.size);
+                // Near-clone: clonal offspring are almost identical to the parent.
+                let child = g.mutated(self.mutation_rate * 0.25, &mut self.rng);
+                clones.push((child, vec3(x, 0.0, z)));
+            }
+        }
+        for (g, pos) in clones {
             let plant = self.make_plant_from_genome(&g, pos);
             self.plants.push(plant);
             self.genomes.push(g);
