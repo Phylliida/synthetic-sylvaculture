@@ -156,7 +156,13 @@ pub fn library() -> Vec<Species> {
         ),
         species(
             "shrub",
-            preset(0.45, 0.22, 1.1, 45.0, -0.12, 0.15, 0.045, 4.5, 3.2),
+            // Multi-stemmed bush: short envelope, decurrent (low λ → laterals get
+            // the vigor), lateral shoots lifted (g2 +), and high basitony so the
+            // basal laterals up-right into a clump of co-equal stems.
+            PlantParams {
+                basitony: 0.7,
+                ..preset(0.42, 0.20, 1.1, 50.0, 0.05, 0.15, 0.05, 2.6, 3.0)
+            },
             (120, 150, 70), (100, 85, 60),
             6.0, 40.0, 16.0, 150.0, 28.0, 6.0, 0.090, 80.0,
         ),

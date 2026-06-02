@@ -106,10 +106,10 @@ fn run_stats() {
     }
 
     // Key evolved traits to display (index into Genome::traits()).
-    let key = |m: &[f32; 18]| {
+    let key = |m: &[f32; 19]| {
         format!(
-            "env_h {:>4.1}  env_r {:>3.1}  v_root {:>5.1}  shade {:.2}  flower {:>4.1}  seed_f {:.3}  life {:>4.0}",
-            m[11], m[12], m[4], m[9], m[13], m[15], m[16]
+            "env_h {:>4.1}  env_r {:>3.1}  v_root {:>5.1}  shade {:.2}  basit {:.2}  flower {:>4.1}  seed_f {:.3}  life {:>4.0}",
+            m[11], m[12], m[4], m[9], m[18], m[13], m[15], m[16]
         )
     };
 
@@ -155,8 +155,9 @@ fn run_stats() {
             .trait_std()
             .map(|s| format!("diversity: env_h σ {:.1}  env_r σ {:.1}  shade σ {:.2}", s[11], s[12], s[9]))
             .unwrap_or_default();
+        let (shrubs, trees) = eco.stratum_counts(4.0);
         println!(
-            "  T={:>4.0}°C P={:>3.0}cm (warm {:.2} water {:.2})  {:<24}  est {:>3}/{:>3}\n      {}\n      {}",
+            "  T={:>4.0}°C P={:>3.0}cm (warm {:.2} water {:.2})  {:<24}  est {:>3}/{:>3}  strata: {:>2} shrub / {:>2} tree\n      {}\n      {}",
             clim.temp,
             clim.precip,
             clim.warmth(),
@@ -164,6 +165,8 @@ fn run_stats() {
             biome_name(clim.temp, clim.precip),
             eco.established_count(),
             eco.plant_count(),
+            shrubs,
+            trees,
             traits,
             spread
         );
@@ -316,7 +319,7 @@ fn run_stats() {
             g2: -0.15, tropism_up: 0.30, xi: 0.25, phi: 0.05, shade_tolerance: 0.30,
             shed_ratio: 0.35, envelope_height: 18.0, envelope_radius: 4.0,
             flowering_age: 50.0, seed_radius: 8.0, seed_freq: 0.06, lifespan: 400.0,
-            apical_relax: 0.0,
+            apical_relax: 0.0, basitony: 0.0,
         };
         let mut eco = Ecosystem::monoculture(220, 14.0, 5, Climate { temp: 12.0, precip: 110.0 }, rep);
         eco.seeding_enabled = false;

@@ -708,8 +708,8 @@ impl Ecosystem {
     /// Std-dev of each genome trait over the **established** plants — the spread
     /// is a diversity measure: a converged monoculture has near-zero spread, a
     /// diverse community a wide one. `None` when fewer than two have established.
-    pub fn trait_std(&self) -> Option<[f32; 18]> {
-        let est: Vec<[f32; 18]> = self
+    pub fn trait_std(&self) -> Option<[f32; 19]> {
+        let est: Vec<[f32; 19]> = self
             .plants
             .iter()
             .zip(&self.genomes)
@@ -720,18 +720,18 @@ impl Ecosystem {
             return None;
         }
         let n = est.len() as f32;
-        let mut mean = [0.0f32; 18];
+        let mut mean = [0.0f32; 19];
         for t in &est {
-            for k in 0..18 {
+            for k in 0..19 {
                 mean[k] += t[k];
             }
         }
         for v in &mut mean {
             *v /= n;
         }
-        let mut var = [0.0f32; 18];
+        let mut var = [0.0f32; 19];
         for t in &est {
-            for k in 0..18 {
+            for k in 0..19 {
                 var[k] += (t[k] - mean[k]).powi(2);
             }
         }
@@ -745,7 +745,7 @@ impl Ecosystem {
     /// see `Genome::NAMES`). Established only — averaging the seedling carpet
     /// (≈ the seed-rain source) would mask what selection actually favoured.
     /// `None` when nothing has established (e.g. a climate too harsh to survive).
-    pub fn mean_traits(&self) -> Option<[f32; 18]> {
+    pub fn mean_traits(&self) -> Option<[f32; 19]> {
         let est: Vec<&Genome> = self
             .plants
             .iter()
@@ -756,10 +756,10 @@ impl Ecosystem {
         if est.is_empty() {
             return None;
         }
-        let mut acc = [0.0f32; 18];
+        let mut acc = [0.0f32; 19];
         for g in &est {
             let t = g.traits();
-            for k in 0..18 {
+            for k in 0..19 {
                 acc[k] += t[k];
             }
         }
@@ -768,6 +768,23 @@ impl Ecosystem {
             *v /= n;
         }
         Some(acc)
+    }
+
+    /// Among ESTABLISHED plants, (short-stature shrubs, taller trees) split at a
+    /// genome `envelope_height` of `h` — to see whether a distinct shrub/under-
+    /// story stratum coexists with the canopy, rather than only reading the mean.
+    pub fn stratum_counts(&self, h: f32) -> (usize, usize) {
+        let (mut shrub, mut tree) = (0usize, 0usize);
+        for (p, g) in self.plants.iter().zip(&self.genomes) {
+            if p.age > CARBON_ESTABLISH {
+                if g.envelope_height < h {
+                    shrub += 1;
+                } else {
+                    tree += 1;
+                }
+            }
+        }
+        (shrub, tree)
     }
 
     pub fn plant_count(&self) -> usize {

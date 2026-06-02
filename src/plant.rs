@@ -88,6 +88,14 @@ pub struct PlantParams {
     /// single leader) when young and decurrent (spreading crown) when old. 0 =
     /// constant λ for life (e.g. a conifer keeps its leader). See `vigor_pass`.
     pub apical_relax: f32,
+    /// Basal dominance (the shrub/coppice habit) ∈ [0,1]: how strongly the
+    /// LOWEST laterals (those near the ground) turn upward toward vertical,
+    /// becoming a clump of co-equal stems instead of angled side branches. 0 = a
+    /// single trunk (tree); high = a multi-stemmed bush. Only the direction of
+    /// basal laterals is affected (see `lateral_direction`) — the vigor routing
+    /// is untouched, so the laterals draw their normal (1−λ) share, which is why
+    /// basitony pairs naturally with low λ (decurrent) to make a full bush.
+    pub basitony: f32,
     /// Resource coefficient α: total resource v_base = α·Q_base (Pałubicki §4.2,
     /// typically ≈2). More α → longer shoots (n = ⌊v⌋) → denser, faster trees.
     pub alpha: f32,
@@ -160,6 +168,7 @@ impl Default for PlantParams {
         Self {
             lambda: 0.52,
             apical_relax: 0.0,
+            basitony: 0.0,
             alpha: 2.0,
             gp: 1.0,
             v_root_max: 120.0,
@@ -811,7 +820,10 @@ impl Plant {
     }
 
     /// Direction of a metamer's lateral bud: the parent axis tilted by the
-    /// branching angle (from determinacy) around the phyllotactic azimuth.
+    /// branching angle (from determinacy) around the phyllotactic azimuth. Near
+    /// the ground a basitonic (shrub) genome turns the lateral UP toward vertical
+    /// — so the lowest laterals become a clump of co-equal stems (a multi-stemmed
+    /// bush) instead of angled side branches.
     fn lateral_direction(&self, id: ModuleId) -> Vec3 {
         let n = self.node(id);
         let d = n.dir.normalize_or_zero();
@@ -820,7 +832,21 @@ impl Plant {
         let azimuth = (n.rank as f32) * GOLDEN_ANGLE;
         let (u, v) = d.any_orthonormal_pair();
         let radial = (u * azimuth.cos() + v * azimuth.sin()).normalize_or_zero();
-        (d * angle.cos() + radial * angle.sin()).normalize_or_zero()
+        let mut dir = (d * angle.cos() + radial * angle.sin()).normalize_or_zero();
+        // Basitony (shrub habit): basal laterals up-right into stems. Strongest
+        // at the very base, fading to nothing above the basal zone, so only the
+        // lowest branches form the clump (higher ones still spread normally).
+        if self.params.basitony > 0.0 {
+            let h = n.tip().y - self.origin.y;
+            let basal_zone = (0.35 * self.params.envelope_height).max(2.0 * self.params.internode_len);
+            let depth = 1.0 - (h / basal_zone).clamp(0.0, 1.0); // 1 at base → 0 at top
+            let uplift = self.params.basitony * depth;
+            // Keep a little of the radial component so the stems splay into a
+            // clump rather than collapsing onto a single trunk.
+            let up = (Vec3::Y + radial * 0.25).normalize_or_zero();
+            dir = (dir * (1.0 - uplift) + up * uplift).normalize_or_zero();
+        }
+        dir
     }
 
     // --- 5. shedding: drop starved lateral branches (Pałubicki §4.4) ---------
