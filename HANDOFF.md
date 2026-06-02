@@ -421,12 +421,20 @@ What to tune:
   seed-rain pool is built from reproductive (lit, *tall*) plants, so it's
   tall-biased and short genomes arrive only as rare immigrants; clonal spread
   bootstraps the short-basitonic ones that do establish, but a broad short-shrub
-  carpet doesn't form. Reverted along the way: a tolerance-only flowering-light
-  discount (collapsed the marginal desert — too much sensitivity, the
-  sprout-collapse Rigor caveat) and a shortness+tolerance-gated version (desert-
-  safe but **inert** — nothing short enough evolves to use it, because of the
-  seed-pool bias). A real fix for the short carpet would attack that source bias
-  directly (e.g. a short/light-stratified recruit channel), carefully measured.
+  carpet doesn't form. **The seed-pool tall-bias that starves the short carpet is
+  LOAD-BEARING, not a defect** — it is what keeps the canopy strategy winning
+  over the shade-subsister. Three things were tried and **reverted**: a
+  tolerance-only flowering-light discount (collapsed the marginal desert); a
+  shortness+tolerance-gated discount (desert-safe but inert — nothing short
+  enough evolves to use it); and a graded fecundity-∝-light pool (de-biased the
+  pool but reopened the sprout collapse *in aggregate* — many shaded plants each
+  breeding a trickle drifts the pool to small/tolerant over a long run). LESSON:
+  any aggregate-significant *shade reproduction* is the sprout collapse, slowed
+  down. The only safe way to populate the understory is **clonal spread** (keyed
+  on the structural `basitony` habit, not on shade reproduction) — which is the
+  thicket layer we have. A true short-shrub *carpet* may simply not be reachable
+  without a different recruitment model (e.g. a real seed bank with its own
+  bounded dynamics), and isn't worth chasing through the flowering rule.
 - **Other paper gaps** (from the two-paper audit): **disturbance** (fire/wind →
   succession reset), a **grass/forb understory** layer, **flowering changes λ/D**
   (mature-form change, e.g. Baobab), the Pałubicki **priority** bud-fate model.
