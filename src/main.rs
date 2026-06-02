@@ -337,9 +337,10 @@ fn run_stats() {
             "  → fitted slope (log mean_biomass vs log density): {:.2}  (ideal −1.5)",
             loglog_slope(&pts)
         );
-        println!("    (the shared marker field gives genuine space-competition plasticity —");
-        println!("     survivors expand into freed space — so the slope approaches −1.5;");
-        println!("     the small residual is the per-species crown/height cap)");
+        println!("    (the cohort thins and mean biomass rises, the right sign — but the slope");
+        println!("     is shallower than −1.5: our crown envelopes are FIXED per genome, so a");
+        println!("     survivor cannot expand into a dead neighbour's freed space, capping its");
+        println!("     biomass. Space-responsive envelopes would steepen this toward −1.5.)");
     }
 }
 
