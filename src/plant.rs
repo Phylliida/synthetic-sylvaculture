@@ -55,6 +55,25 @@ pub(crate) const MAX_SHOOT: u32 = 2;
 const CROWN_EXPAND_R: f32 = 0.8; // radius → up to 1.8× the genome envelope_radius
 const CROWN_EXPAND_H: f32 = 0.3; // height → up to 1.3× the genome envelope_height
 
+/// Biomechanical breaking (an extension *beyond* the papers — they model only
+/// passive bending via gravitropism `g2`). A branch is a cantilever bearing the
+/// weight of everything distal to it; the bending stress at its base ≈
+/// (distal weight × horizontal lever-arm) / (section modulus ∝ diameter³). If it
+/// exceeds `BREAK_STRESS` the branch snaps off (mechanical failure — distinct
+/// from light-based shedding). Vertical leaders have ~zero lever arm (safe);
+/// long horizontal cantilevers build stress as they extend/load until their
+/// pipe-model thickness can't support them. The trunk axis (order 0) is exempt.
+// Healthy plants develop max bending stress in a tight ~200–370 band (the pipe
+// model already keeps stress roughly uniform — da-Vinci/√-leaf branching ≈
+// uniform stress); the ECOSYSTEM's over-extended tail (leaners, gap-reaching
+// crowns) runs much higher (p99 ~730, max ~2400). 500 sits above the healthy
+// band so normal branches never snap, and prunes only the genuinely
+// over-extended cantilevers. (1e9 ⇒ effectively off, for A/B.)
+const BREAK_STRESS: f32 = 500.0;
+/// Foliage mass lumped at each leaf-bearing tip (where the lever arm is largest),
+/// in the same arbitrary units as wood volume (`diam²·length`).
+const LEAF_MASS: f32 = 0.02;
+
 /// Deterministic pseudo-random value in [0,1) from a module id (splitmix64
 /// finalizer) — lets the monopodial/sympodial bud-fate choice be varied yet
 /// fully reproducible, with no RNG threaded through the plant.
@@ -391,6 +410,7 @@ impl Plant {
         self.grow();
         self.shed();
         self.recompute_diameters();
+        self.break_overstressed();
     }
 
     // --- 1. environment: space colonization (Pałubicki §4.1) -----------------
@@ -947,6 +967,84 @@ impl Plant {
             let prev = self.node(id).diam;
             self.node_mut(id).diam = d.max(prev);
         }
+    }
+
+    // --- biomechanical breaking (extension beyond the papers) ----------------
+    /// Per-internode bending stress ≈ (distal weight × horizontal lever-arm) /
+    /// (section modulus ∝ diam³), a cantilever-beam model. Post-order accumulates
+    /// each subtree's mass and centroid; the lever arm is the centroid's
+    /// HORIZONTAL offset from the internode's base (gravity is vertical, so only
+    /// horizontal offset bends the beam). Id-indexed (0 for empty slots).
+    fn bending_stress(&self) -> Vec<f32> {
+        let order = self.post_order(self.root);
+        let n = self.nodes.len();
+        let mut submass = vec![0.0f32; n]; // distal subtree mass (incl. this node)
+        let mut mompos = vec![Vec3::ZERO; n]; // mass-weighted position sum
+        for &id in &order {
+            let node = self.node(id);
+            let wood = node.diam * node.diam * node.length; // ∝ wood volume
+            let mut m = wood;
+            let mut mp = (node.base + node.tip()) * (0.5 * wood); // wood at its centroid
+            if node.children.is_empty() {
+                m += LEAF_MASS; // foliage at the tip
+                mp += node.tip() * LEAF_MASS;
+            }
+            let nc = node.children.len();
+            for ci in 0..nc {
+                let c = self.node(id).children[ci];
+                m += submass[c];
+                mp += mompos[c];
+            }
+            submass[id] = m;
+            mompos[id] = mp;
+        }
+        let mut stress = vec![0.0f32; n];
+        for &id in &order {
+            let m = submass[id];
+            if m <= 1e-9 {
+                continue;
+            }
+            let base = self.node(id).base;
+            let centroid = mompos[id] / m;
+            let (dx, dz) = (centroid.x - base.x, centroid.z - base.z);
+            let lever = (dx * dx + dz * dz).sqrt();
+            let modulus = self.node(id).diam.powi(3).max(1e-9);
+            stress[id] = m * lever / modulus;
+        }
+        stress
+    }
+
+    /// Snap off branches whose bending stress exceeds `BREAK_STRESS` (mechanical
+    /// failure). The trunk axis (order 0) is exempt — a tree doesn't snap at its
+    /// own base here. Stresses are read from the pre-break state, then all
+    /// overstressed branches are removed (the load redistributes next step).
+    fn break_overstressed(&mut self) {
+        if BREAK_STRESS >= 1.0e9 {
+            return; // effectively off
+        }
+        let stress = self.bending_stress();
+        let mut to_break: Vec<ModuleId> = Vec::new();
+        for &id in &self.post_order(self.root) {
+            if self.node(id).order >= 1 && stress[id] > BREAK_STRESS {
+                to_break.push(id);
+            }
+        }
+        for id in to_break {
+            if self.nodes[id].is_some() {
+                self.remove_subtree(id);
+            }
+        }
+    }
+
+    /// Maximum bending stress over breakable (order ≥ 1) internodes — for tuning
+    /// `BREAK_STRESS` against the actual stress range a grown plant develops.
+    pub fn max_bending_stress(&self) -> f32 {
+        let stress = self.bending_stress();
+        self.alive_ids()
+            .iter()
+            .filter(|&&id| self.node(id).order >= 1)
+            .map(|&id| stress[id])
+            .fold(0.0, f32::max)
     }
 
     // --- storage / traversal helpers -----------------------------------------
@@ -1745,5 +1843,62 @@ mod tests {
         plant.shed();
         let after = plant.alive_ids().iter().filter(|&&id| plant.node(id).order >= 1).count();
         assert!(after < with_laterals, "shedding removed nothing: {with_laterals} -> {after}");
+    }
+
+    #[test]
+    fn overstressed_cantilever_breaks_vertical_survives() {
+        // Biomechanics: a long thin HORIZONTAL arm is a cantilever with a large
+        // lever arm → high bending stress → it snaps; a VERTICAL column of the
+        // same length has ~zero lever arm → ~zero stress → it survives.
+        fn arm(dir: Vec3, n: usize) -> Plant {
+            let mut p = Plant::new(PlantParams::default(), Vec3::ZERO);
+            let phi = p.params.phi;
+            let mut prev = p.root;
+            for k in 0..n {
+                let base = p.node(prev).tip();
+                let node = Internode {
+                    parent: Some(prev),
+                    children: Vec::new(),
+                    base,
+                    dir,
+                    length: 1.0,
+                    order: 1, // a lateral axis (order ≥ 1 — breakable)
+                    rank: k as u32,
+                    age: 20.0,
+                    terminal_bud: false,
+                    lateral_bud: false,
+                    relay_bud: false,
+                    q_bud: 0.0,
+                    v_grow: Vec3::ZERO,
+                    q_acc: 0.0,
+                    light_level: 1.0,
+                    vigor: 0.0,
+                    term_resource: 0.0,
+                    lat_resource: 0.0,
+                    diam: phi,
+                };
+                let id = p.alloc(node);
+                p.node_mut(prev).children.push(id);
+                prev = id;
+            }
+            p.recompute_diameters();
+            p
+        }
+        let mut horiz = arm(Vec3::X, 14);
+        let mut vert = arm(Vec3::Y, 14);
+        // The horizontal cantilever is far more stressed than the vertical column.
+        assert!(
+            horiz.max_bending_stress() > 5.0 * vert.max_bending_stress().max(1e-6),
+            "horizontal {} should be ≫ vertical {}",
+            horiz.max_bending_stress(),
+            vert.max_bending_stress()
+        );
+        // It snaps; the vertical column does not.
+        let nb = horiz.module_count();
+        horiz.break_overstressed();
+        assert!(horiz.module_count() < nb, "overstressed cantilever should snap: {nb} -> {}", horiz.module_count());
+        let nv = vert.module_count();
+        vert.break_overstressed();
+        assert_eq!(vert.module_count(), nv, "vertical column should not break");
     }
 }

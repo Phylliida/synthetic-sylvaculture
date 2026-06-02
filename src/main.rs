@@ -191,7 +191,7 @@ fn run_stats() {
         let basal = segs.iter().map(|s| s.ra).fold(0.0, f32::max);
         let (h, crown, apex) = plant.shape();
         println!(
-            "  {:<22} mod {:>3}  h {:5.1}  trunk_r {:.3}  slender {:>4.0}  spread {:.2}  apex_lean {:.2}",
+            "  {:<22} mod {:>3}  h {:5.1}  trunk_r {:.3}  slender {:>4.0}  spread {:.2}  apex_lean {:.2}  max_stress {:>6.0}",
             sp.name,
             plant.module_count(),
             h,
@@ -199,6 +199,22 @@ fn run_stats() {
             h / (2.0 * basal).max(1e-3),
             crown / h.max(1e-3),
             apex / h.max(1e-3),
+            plant.max_bending_stress(),
+        );
+    }
+
+    println!("\nbending stress in a GROWN STAND (warm-wet, 180 steps) — vs healthy-species band ~200-370:");
+    {
+        let mut eco = Ecosystem::new(40, 22.0, 7, Climate { temp: 24.0, precip: 300.0 });
+        for _ in 0..180 {
+            eco.step(1.0);
+        }
+        let mut s: Vec<f32> = eco.plants.iter().map(|p| p.max_bending_stress()).collect();
+        s.sort_by(f32::total_cmp);
+        let pct = |f: f32| if s.is_empty() { 0.0 } else { s[((f * (s.len() as f32 - 1.0)) as usize).min(s.len() - 1)] };
+        println!(
+            "  plants {}  per-plant max-stress: median {:.0}  p90 {:.0}  p99 {:.0}  max {:.0}",
+            s.len(), pct(0.5), pct(0.9), pct(0.99), s.last().copied().unwrap_or(0.0),
         );
     }
 
