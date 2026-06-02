@@ -116,6 +116,18 @@ impl StepTimings {
 /// Each module casts a downward pyramidal penumbra into a voxel grid; a module
 /// then reads its light availability Q_G = max(C − s + a, 0)/C from the grid.
 /// The `+a` cancels a module's self-shadow.
+///
+/// NOTE: this is a *vertical* (overhead) shadow — read in reverse it already
+/// integrates occlusion over an upward ~45° cone, i.e. a crude zenith-weighted
+/// hemisphere of sky light. An explicit **hemispherical** version (a zenith
+/// deposit + a ring of oblique deposits, scale-neutral) was tried and reverted:
+/// even gentle, the oblique side-light biased branch vigor toward gaps (the
+/// banana-arc pathology returned) and, once tuned to stay upright, it *halved*
+/// the climate-specialization contrast (tropical-vs-boreal crown breadth) and
+/// suppressed the tropical thicket understory (basitony 0.57→0.05) — the same
+/// side-lighting mechanism caused both the nicer floor shadows and the harm, so
+/// there was no sweet spot. The vertical model is the better fit for this
+/// architecture. (See the floor-light heatmap for what the vertical model gives.)
 struct ShadowGrid {
     min: Vec3,
     cell: f32,
