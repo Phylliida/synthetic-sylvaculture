@@ -307,7 +307,7 @@ fn run_stats() {
             lambda: 0.52, determinacy: 0.5, alpha: 2.2, gp: 1.0, v_root_max: 140.0,
             g2: -0.15, tropism_up: 0.30, xi: 0.25, phi: 0.05, shade_tolerance: 0.30,
             shed_ratio: 0.35, envelope_height: 18.0, envelope_radius: 4.0,
-            flowering_age: 50.0, seed_radius: 8.0, seed_freq: 0.06, lifespan: 120.0,
+            flowering_age: 50.0, seed_radius: 8.0, seed_freq: 0.06, lifespan: 400.0,
             apical_relax: 0.0,
         };
         let mut eco = Ecosystem::monoculture(220, 14.0, 5, Climate { temp: 12.0, precip: 110.0 }, rep);
@@ -315,7 +315,7 @@ fn run_stats() {
         let area = 4.0 * eco.size * eco.size;
         let mut pts: Vec<(f32, f32)> = Vec::new();
         let mut last_n = usize::MAX;
-        for s in 1..=320 {
+        for s in 1..=600 {
             eco.step(1.0);
             // Sample the ACTIVE thinning trajectory: a point only when the cohort
             // has actually thinned since the last sample (the frozen tail, once a
@@ -338,10 +338,9 @@ fn run_stats() {
             "  → fitted slope (log mean_biomass vs log density): {:.2}  (ideal −1.5)",
             loglog_slope(&pts)
         );
-        println!("    (the cohort thins and mean biomass rises, the right sign — but the slope");
-        println!("     is shallower than −1.5: our crown envelopes are FIXED per genome, so a");
-        println!("     survivor cannot expand into a dead neighbour's freed space, capping its");
-        println!("     biomass. Space-responsive envelopes would steepen this toward −1.5.)");
+        println!("    (space-responsive crowns: survivors expand into freed space as the stand");
+        println!("     thins, so mean biomass keeps rising and the slope approaches −1.5. The");
+        println!("     residual to −1.5 is the early establishment crash + discrete sampling.)");
     }
 }
 

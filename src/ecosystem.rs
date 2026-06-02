@@ -422,7 +422,7 @@ impl Ecosystem {
         let mut wood: Vec<Vec3> = Vec::new();
         for (pi, p) in self.plants.iter().enumerate() {
             let ceiling = p.reveal_ceiling();
-            let crown_r = p.params.envelope_radius + p.params.internode_len;
+            let crown_r = p.crown_radius();
             for (id, pos, dir) in p.active_buds() {
                 bud_keys.push((pi, id));
                 buds.push(BudQuery { pos, dir, ceiling, center: p.origin, crown_r });

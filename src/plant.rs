@@ -45,6 +45,16 @@ const GOLDEN_ANGLE: f32 = 2.399_963_2;
 /// rather than extruding one long straight beam in a single cycle.
 pub(crate) const MAX_SHOOT: u32 = 2;
 
+/// Space-responsive crown: the genome envelope is the YOUNG crown; the *potential*
+/// crown grows with maturity (age/p_max) toward these multiples of it. The tree
+/// only FILLS the expanded crown where free markers exist, so a gap/open tree
+/// spreads and rises into old age while a crowded one stays bounded by its
+/// neighbours — and a survivor expands into the space a dead neighbour frees.
+/// This is what lets self-thinning approach −3/2 and old crowns spread (the
+/// development that a fixed envelope froze).
+const CROWN_EXPAND_R: f32 = 0.8; // radius → up to 1.8× the genome envelope_radius
+const CROWN_EXPAND_H: f32 = 0.3; // height → up to 1.3× the genome envelope_height
+
 /// Deterministic pseudo-random value in [0,1) from a module id (splitmix64
 /// finalizer) — lets the monopodial/sympodial bud-fate choice be varied yet
 /// fully reproducible, with no RNG threaded through the plant.
@@ -282,6 +292,11 @@ impl Plant {
             lat_resource: 0.0,
             diam: params.phi,
         };
+        // Private dome (standalone `Consume` mode) sized to the genome envelope
+        // (keeping marker density high enough for a seedling to perceive). The
+        // space-responsive crown expansion only manifests in the ECOSYSTEM, where
+        // the shared field provides markers beyond the genome envelope to grow
+        // into; a single `--tree` inspector tree therefore stays genome-sized.
         let markers = generate_markers(
             origin,
             params.envelope_radius,
@@ -444,13 +459,29 @@ impl Plant {
             .collect()
     }
 
-    /// Reachable-marker ceiling: rises with age (gradual bottom-up growth) but
-    /// caps at the species height (envelope_height), so a tree stops growing up
-    /// at its genetic maximum even in a tall shared marker field — this keeps
-    /// species height differentiation in the ecosystem.
+    /// Maturity ∈ [0,1] over the plant's pre-senescence life — drives the
+    /// space-responsive crown expansion (and age-dependent apical control).
+    fn maturity(&self) -> f32 {
+        (self.age / self.params.p_max.max(1.0)).clamp(0.0, 1.0)
+    }
+
+    /// Reachable-marker ceiling: rises with age (gradual bottom-up growth). The
+    /// cap is the genome height when young and grows with maturity (space-
+    /// responsive — an old tree can rise into freed canopy), but the tree only
+    /// fills it where free markers exist, so height differentiation is kept.
     pub fn reveal_ceiling(&self) -> f32 {
+        let cap = self.params.envelope_height * (1.0 + CROWN_EXPAND_H * self.maturity())
+            + self.params.internode_len;
         let rise = 2.0 * self.params.internode_len + self.age * self.params.climb_rate;
-        self.origin.y + rise.min(self.params.envelope_height + self.params.internode_len)
+        self.origin.y + rise.min(cap)
+    }
+
+    /// Horizontal crown bound. The genome radius is the young crown; it grows with
+    /// maturity (so an open/gap tree spreads into old age), bounded in practice by
+    /// free-marker availability — i.e. by competition.
+    pub fn crown_radius(&self) -> f32 {
+        self.params.envelope_radius * (1.0 + CROWN_EXPAND_R * self.maturity())
+            + self.params.internode_len
     }
 
     pub fn clear_markers(&mut self) {
@@ -462,7 +493,7 @@ impl Plant {
     fn colonize_self(&mut self) -> FxIdMap<Vec3> {
         let p = self.params.clone();
         let ceiling = self.reveal_ceiling();
-        let crown_r = p.envelope_radius + p.internode_len;
+        let crown_r = self.crown_radius();
         let origin = self.origin;
         let active = self.active_buds();
         let buds: Vec<BudQuery> = active

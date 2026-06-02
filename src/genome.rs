@@ -166,9 +166,15 @@ impl Genome {
     /// genome automatically gets the budget to fill it (and a small one stays
     /// cheap — which also keeps tiny scrub fast to simulate).
     pub fn to_params(&self) -> PlantParams {
+        // Size the marker/module budget for the EXPANDED crown a mature tree can
+        // grow into (space-responsive crowns reach ~1.8× radius × 1.3× height ≈
+        // 4.2× volume), so a survivor expanding into a gap isn't throttled by its
+        // budget before it fills the bigger crown. (Still bounded by resource and
+        // free space, so crowded trees stay small.)
         let vol = std::f32::consts::PI * self.envelope_radius * self.envelope_radius * self.envelope_height;
-        let markers = (vol * 1.4).clamp(300.0, 2600.0) as usize;
-        let modules = (vol * 1.6).clamp(300.0, 2600.0) as usize;
+        let vol = vol * 4.2;
+        let markers = (vol * 1.4).clamp(300.0, 3200.0) as usize;
+        let modules = (vol * 1.6).clamp(300.0, 3200.0) as usize;
         PlantParams {
             lambda: self.lambda,
             determinacy: self.determinacy,
