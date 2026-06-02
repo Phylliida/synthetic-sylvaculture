@@ -72,6 +72,12 @@ const CLONE_BASITONY_MIN: f32 = 0.25;
 /// understory plant must reach real light (a gap, or the canopy) to set seed.
 /// Without this, small shade-tolerant plants reproduce in the dark and
 /// out-breed the slow canopy trees, collapsing the stand to a lawn of sprouts.
+/// (This tall-bias on the seed pool is LOAD-BEARING — it is what keeps the
+/// canopy strategy winning over the shade-subsister. A graded fecundity-∝-light
+/// version was tried to de-bias the pool toward the understory and it reopened
+/// the collapse in aggregate, drifting the pool toward small/tolerant over a
+/// long run; reverted. The right way to populate the understory is clonal spread,
+/// keyed on basitony — a structural habit, not shade reproduction.)
 const FLOWER_LIGHT: f32 = 0.32;
 /// Plant-parallel grow: the per-plant growth cycles are independent (each reads
 /// its own qg/space and the read-only shared centres/grid, mutates only itself),
