@@ -38,6 +38,14 @@ fn make_bark(context: &Context, rgb: (u8, u8, u8)) -> PhysicalMaterial {
     m
 }
 
+/// Broad↔needle foliage factor from a plant's crown slenderness (mirrors
+/// `Genome::foliage_style`, for the single-plant / `--tree` inspector which uses
+/// `PlantParams` rather than a `Genome`).
+fn needle_factor(p: &PlantParams) -> f32 {
+    let slender = (p.envelope_height / (p.envelope_radius * 2.0)).clamp(0.4, 3.0);
+    ((slender - 0.9) / 1.6).clamp(0.0, 1.0)
+}
+
 fn make_leaf(context: &Context, rgb: (u8, u8, u8)) -> PhysicalMaterial {
     let mut m = PhysicalMaterial::new_opaque(
         context,
@@ -704,7 +712,10 @@ fn run_tree_shot() {
         make_bark(&context, sp.bark_rgb),
     );
     let foliage = Gm::new(
-        Mesh::new(&context, &mesh::build_foliage_mesh(&plant.leaves(), 0.4, 6)),
+        Mesh::new(
+            &context,
+            &mesh::build_foliage_mesh(&plant.leaves(), 0.4, 6, needle_factor(&plant.params)),
+        ),
         make_leaf(&context, sp.leaf_rgb),
     );
 
@@ -1055,7 +1066,12 @@ fn main() {
     let mut foliage = Gm::new(
         Mesh::new(
             &context,
-            &mesh::build_foliage_mesh(&plant.leaves(), leaf_size, leaves_per_cluster),
+            &mesh::build_foliage_mesh(
+                &plant.leaves(),
+                leaf_size,
+                leaves_per_cluster,
+                needle_factor(&plant.params),
+            ),
         ),
         make_leaf(&context, species[sp_idx].leaf_rgb),
     );
@@ -1071,7 +1087,12 @@ fn main() {
     let rebuild_foliage = move |plant: &Plant, context: &Context| {
         Mesh::new(
             context,
-            &mesh::build_foliage_mesh(&plant.leaves(), leaf_size, leaves_per_cluster),
+            &mesh::build_foliage_mesh(
+                &plant.leaves(),
+                leaf_size,
+                leaves_per_cluster,
+                needle_factor(&plant.params),
+            ),
         )
     };
 

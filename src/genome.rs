@@ -208,6 +208,17 @@ impl Genome {
         hsv_to_rgb(hue, 0.62, val)
     }
 
+    /// Foliage broad↔needle factor ∈ [0,1] from crown slenderness — the SAME
+    /// axis that sets leaf hue (`leaf_rgb`). A tall-narrow (excurrent,
+    /// conifer-like) genome reads as needleleaf (1), a short-broad one as
+    /// broadleaf (0). Emergent, not a separate trait: morphology that already
+    /// evolves picks the leaf shape, so a specializing biome is *seen* to shift
+    /// between needle and broad foliage. See `mesh::LeafStyle`.
+    pub fn foliage_style(&self) -> f32 {
+        let slender = (self.envelope_height / (self.envelope_radius * 2.0)).clamp(0.4, 3.0);
+        ((slender - 0.9) / 1.6).clamp(0.0, 1.0)
+    }
+
     /// Bark colour: thicker/larger genomes read darker and browner.
     pub fn bark_rgb(&self) -> [u8; 3] {
         let big = ((self.v_root_max - 40.0) / 180.0).clamp(0.0, 1.0);

@@ -818,18 +818,25 @@ impl Ecosystem {
         parts.into_iter().flatten().collect()
     }
 
-    /// Per-plant leaf points tinted with that plant's leaf colour (parallel
-    /// gather like `trunk_batches`).
-    pub fn foliage_batches(&self) -> Vec<(Vec<(Vec3, Vec3)>, [u8; 3])> {
+    /// Per-plant leaf points tagged with that plant's leaf appearance (colour +
+    /// broad↔needle style, both from the genome). Parallel gather like
+    /// `trunk_batches`.
+    pub fn foliage_batches(&self) -> Vec<(Vec<(Vec3, Vec3)>, crate::mesh::LeafStyle)> {
         let (plants, genomes) = (&self.plants, &self.genomes);
-        let parts: Vec<Vec<(Vec<(Vec3, Vec3)>, [u8; 3])>> = std::thread::scope(|scope| {
+        let parts: Vec<Vec<(Vec<(Vec3, Vec3)>, crate::mesh::LeafStyle)>> = std::thread::scope(|scope| {
             let handles: Vec<_> = self
                 .plant_chunks()
                 .into_iter()
                 .map(|(s, e)| {
                     scope.spawn(move || {
                         (s..e)
-                            .map(|i| (plants[i].leaves(), genomes[i].leaf_rgb()))
+                            .map(|i| {
+                                let style = crate::mesh::LeafStyle {
+                                    rgb: genomes[i].leaf_rgb(),
+                                    needle: genomes[i].foliage_style(),
+                                };
+                                (plants[i].leaves(), style)
+                            })
                             .collect::<Vec<_>>()
                     })
                 })

@@ -88,10 +88,59 @@ fn hash01(n: u32) -> f32 {
     (x & 0x00FF_FFFF) as f32 / 16_777_216.0
 }
 
-/// Build a foliage mesh: a small fan of leaf quads at each twig point, fanning
+/// Per-plant foliage appearance, derived from its genome (see
+/// `Genome::leaf_rgb`/`foliage_style`). `rgb` is the leaf colour; `needle` ∈
+/// [0,1] morphs the leaf blade from a broad diamond (0 — broadleaf) to a long
+/// thin needle pointing along the twig (1 — conifer spray), so a tall-narrow
+/// (excurrent, conifer-like) genome reads as needleleaf and a short-broad one as
+/// broadleaf — the same slenderness axis that already sets leaf hue.
+#[derive(Clone, Copy)]
+pub struct LeafStyle {
+    pub rgb: [u8; 3],
+    pub needle: f32,
+}
+
+/// The four corners (+ normal) of one leaf blade, given its attachment point,
+/// the radial spray direction, the twig direction, the (randomised) size, and
+/// the broad↔needle factor. Broad: a wide diamond fanning outward; needle: a
+/// longer, much thinner blade angled more along the twig. Shared by the forest
+/// and single-plant builders so the two stay identical.
+fn leaf_blade(
+    base_pt: GVec3,
+    radial: GVec3,
+    dir: GVec3,
+    size: f32,
+    needle: f32,
+) -> ([GVec3; 4], GVec3) {
+    // Needles point more along the twig, run longer, and are far narrower.
+    let along = 0.5 + 0.6 * needle;
+    let len = size * (1.0 + 0.7 * needle);
+    let wfrac = 0.38 - 0.28 * needle;
+    let leaf_dir = (radial + dir * along).normalize_or_zero();
+    let width_axis = leaf_dir.cross(radial).normalize_or_zero();
+    let tip = base_pt + leaf_dir * len;
+    let mid = base_pt + leaf_dir * (len * 0.45);
+    let half_w = width_axis * (len * wfrac);
+    let p0 = base_pt;
+    let p1 = mid + half_w;
+    let p2 = tip;
+    let p3 = mid - half_w;
+    let normal = (p1 - p0).cross(p3 - p0).normalize_or_zero();
+    ([p0, p1, p2, p3], normal)
+}
+
+/// Build a foliage mesh: a small fan of leaf blades at each twig point, fanning
 /// outward around the twig direction. Per-leaf green variation via vertex
-/// colors. `points` is (position, outward direction).
-pub fn build_foliage_mesh(points: &[(GVec3, GVec3)], leaf_size: f32, per_cluster: usize) -> CpuMesh {
+/// colors. `points` is (position, outward direction); `needle` ∈ [0,1] morphs
+/// broad↔needle (see `LeafStyle`). Colour comes from the material albedo (the
+/// single-plant viewer sets it per species), so the vertex colours here are
+/// only near-white brightness variation.
+pub fn build_foliage_mesh(
+    points: &[(GVec3, GVec3)],
+    leaf_size: f32,
+    per_cluster: usize,
+    needle: f32,
+) -> CpuMesh {
     let mut positions: Vec<Vector3<f32>> = Vec::new();
     let mut normals: Vec<Vector3<f32>> = Vec::new();
     let mut colors: Vec<Srgba> = Vec::new();
@@ -109,22 +158,9 @@ pub fn build_foliage_mesh(points: &[(GVec3, GVec3)], leaf_size: f32, per_cluster
             let az = std::f32::consts::TAU * (j as f32 / per_cluster as f32)
                 + hash01(seed) * 1.2;
             let radial = (u * az.cos() + v * az.sin()).normalize_or_zero();
-            // Leaf points outward and a bit along the twig.
-            let leaf_dir = (radial + dir * 0.5).normalize_or_zero();
-            let width_axis = leaf_dir.cross(radial).normalize_or_zero();
             let size = leaf_size * (0.7 + 0.6 * hash01(seed.wrapping_add(7)));
-
             let base_pt = *pos + dir * (leaf_size * 0.2);
-            let tip = base_pt + leaf_dir * size;
-            let half_w = width_axis * (size * 0.35);
-            // Diamond/leaf quad: base, two side mid-points, tip.
-            let mid = base_pt + leaf_dir * (size * 0.45);
-            let p0 = base_pt;
-            let p1 = mid + half_w;
-            let p2 = tip;
-            let p3 = mid - half_w;
-
-            let normal = (p1 - p0).cross(p3 - p0).normalize_or_zero();
+            let ([p0, p1, p2, p3], normal) = leaf_blade(base_pt, radial, dir, size, needle);
             let base_idx = positions.len() as u32;
             // Per-leaf brightness variation as near-white tints. The leaf
             // material's green albedo is multiplied by these, so leaves read
@@ -273,7 +309,7 @@ pub fn build_forest_mesh(batches: &[(Vec<Segment>, [u8; 3])], sides: usize) -> C
 /// chunk's first global vertex index, so emitted indices are absolute.
 #[allow(clippy::too_many_arguments)]
 fn fill_foliage(
-    batches: &[(Vec<(GVec3, GVec3)>, [u8; 3])],
+    batches: &[(Vec<(GVec3, GVec3)>, LeafStyle)],
     base_bi: usize,
     vbase: u32,
     leaf_size: f32,
@@ -285,8 +321,9 @@ fn fill_foliage(
 ) {
     let mut vi = 0usize;
     let mut ii = 0usize;
-    for (local_bi, (points, rgb)) in batches.iter().enumerate() {
+    for (local_bi, (points, style)) in batches.iter().enumerate() {
         let bi = base_bi + local_bi;
+        let rgb = style.rgb;
         for (ti, (pos_p, dir)) in points.iter().enumerate() {
             let dir = dir.normalize_or_zero();
             let (u, v) = if dir.length_squared() > 1e-6 {
@@ -302,19 +339,10 @@ fn fill_foliage(
                 let az =
                     std::f32::consts::TAU * (j as f32 / per_cluster as f32) + hash01(seed) * 1.2;
                 let radial = (u * az.cos() + v * az.sin()).normalize_or_zero();
-                let leaf_dir = (radial + dir * 0.5).normalize_or_zero();
-                let width_axis = leaf_dir.cross(radial).normalize_or_zero();
                 let size = leaf_size * (0.7 + 0.6 * hash01(seed.wrapping_add(7)));
-
                 let base_pt = *pos_p + dir * (leaf_size * 0.2);
-                let tip = base_pt + leaf_dir * size;
-                let mid = base_pt + leaf_dir * (size * 0.45);
-                let half_w = width_axis * (size * 0.35);
-                let p0 = base_pt;
-                let p1 = mid + half_w;
-                let p2 = tip;
-                let p3 = mid - half_w;
-                let normal = (p1 - p0).cross(p3 - p0).normalize_or_zero();
+                let ([p0, p1, p2, p3], normal) =
+                    leaf_blade(base_pt, radial, dir, size, style.needle);
 
                 // Per-leaf brightness around the species leaf colour.
                 let t = 0.75 + 0.4 * hash01(seed.wrapping_add(31));
@@ -351,14 +379,14 @@ fn fill_foliage(
 /// parallel like the trunk mesh — each chunk fills its disjoint slice (exact
 /// counts: every twig yields per_cluster·4 verts) — bit-identical to sequential.
 pub fn build_forest_foliage(
-    batches: &[(Vec<(GVec3, GVec3)>, [u8; 3])],
+    batches: &[(Vec<(GVec3, GVec3)>, LeafStyle)],
     leaf_size: f32,
     per_cluster: usize,
 ) -> CpuMesh {
     let n_chunks = n_mesh_chunks(batches.len());
     // Balance chunks by twig count (work), keeping them contiguous.
     let weights: Vec<usize> = batches.iter().map(|(p, _)| p.len()).collect();
-    let chunks: Vec<&[(Vec<(GVec3, GVec3)>, [u8; 3])]> =
+    let chunks: Vec<&[(Vec<(GVec3, GVec3)>, LeafStyle)]> =
         balanced_ranges(&weights, n_chunks).iter().map(|&(s, e)| &batches[s..e]).collect();
     // Exact per-chunk counts (per_cluster*4 verts / per_cluster*6 indices per
     // twig), the chunk's first global batch index, and its vertex offset.
