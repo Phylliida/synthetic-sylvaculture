@@ -157,7 +157,20 @@ impl ShadowGrid {
             s: vec![0.0; nx * ny * nz],
             a: 1.0,
             b: 2.0,
-            c: 8.0,
+            // Full-exposure constant = the canopy-LEAKINESS knob. Light is
+            // Q = max(C − s + a, 0)/C, so a denser column (higher accumulated
+            // shadow s) is needed to darken the floor as C rises — i.e. the
+            // canopy lets more light through. Raised 8 -> 11 to leak more light
+            // to the floor (a brighter, dapplier understory). The floor
+            // brightening is robust/deterministic; the finer ecological effects
+            // (an understory stratum, the exact self-thinning slope) proved to be
+            // within single-SEED NOISE across 8/9/11, so this is an aesthetic
+            // choice, not a tuned optimum — dial it freely (higher = leakier).
+            // LOAD-BEARING: it also sets the strength of light competition
+            // (self-thinning / succession), so judge changes multi-seed + at
+            // settled horizons, not one short run. Validation held at 11 (pipe
+            // 0.51, self-thinning ~-1.3, climate specialization test passes).
+            c: 11.0,
             qmax: 6,
         }
     }
