@@ -39,7 +39,7 @@ cd synthetic-sylvaculture
 ./run.sh                 # single-plant viewer (N cycles species)
 cargo run -- --stats     # headless readouts: EVOLUTION trace, 2D specialization, validation
 cargo run --release -- --bench   # headless perf benchmark (sim + mesh; see Performance)
-cargo test --release     # 27 tests (no GPU); ~18 s
+cargo test --release     # 30 tests (no GPU); ~18 s
 ./run.sh --tree 6 --steps 200 --shot t.png            # ONE archetype species, framed solo
 ./run.sh --tree 0 --steps 160 --bare --shot t.png     # ...skeleton only (branch geometry)
 ./run.sh --shot e.png --temp 26 --precip 320 --steps 170   # ecosystem frame (+ biome chart)
@@ -58,7 +58,9 @@ with `nix-shell -p poppler-utils --run "pdftotext file.pdf out.txt"`.
   reseed (random founders); the others resize **in place** (the stand is kept).
   The sim runs **unthrottled** (a per-frame time budget, not a fixed cadence) —
   it advances as fast as the frame allows. The biome chart names each region and
-  marks the current climate in red. Mouse orbits/zooms.
+  marks the current climate in red; the **floor-light heatmap (top-right)** shows
+  how much light reaches the floor across the plot (dark = shaded, bright = sun).
+  Mouse orbits/zooms.
 - **Single plant** (`./run.sh`): Space/S/R · N cycle archetype species · ←/→
   apical control λ · ↑/↓ growth rate · F foliage. (Inspector for the `species.rs`
   presets — *not* the evolving ecosystem.)
@@ -81,7 +83,7 @@ looks like a geometry bug).
 | `src/species.rs` | 7 plant-type **archetype presets** `preset(λ,D,gp,v_root_max,g2,s_tol,φ,env_h,env_r)` — used ONLY by the single-plant/`--tree` inspector + the morphology tests. The ecosystem evolves genomes, not these. (Climate-niche fields are dead, `#[allow(dead_code)]`.) |
 | `src/ecosystem.rs` | `Ecosystem` (now **genome-based, evolving**): shared marker field (`regenerate_field`, `set_size`/`set_field_height` resize), `ShadowGrid`, `Climate::warmth/water/productivity`, `survival_bar` (2D-climate carbon cost), `cull_dead` (starvation + senescence + **Janzen–Connell** `similar_crowding`), `seed` (inherit+mutate + **seed rain** + **clonal/vegetative spread** for basitonic shrubs, vigor-scaled maturity), `mean_traits`/`trait_std`/`established_count`/`stratum_counts`, `step_timed`, parallel grow + mesh gather. |
 | `src/mesh.rs` | Skeleton → generalized-cylinder mesh; foliage blades (`leaf_blade` morphs broad↔needle per `LeafStyle{rgb,needle}`); **parallel in-place** per-plant-coloured forest mesh (`balanced_ranges`/`carve_mut`/`uninit_vec` → prefix-sum slice fill, no concat). |
-| `src/overlay.rs` | Clickable Whittaker biome chart **with biome name labels** (self-contained 5×7 `glyph` bitmap font + `push_text`); `screen_to_climate`. |
+| `src/overlay.rs` | Clickable Whittaker biome chart (top-left) **with biome name labels** (self-contained 5×7 `glyph` bitmap font + `push_text`); `screen_to_climate`; the **floor-light heatmap** (top-right, `build_floor_light`/`heatmap_rect`/`light_color` — a shade→sun heat ramp of how much light reaches the floor). |
 | `src/main.rs` | Viewers (`run`, `run_ecosystem` with resize keys + unthrottled stepping), `run_tree_shot` (`--tree [--bare]`), `run_shot`, `run_stats` (EVOLUTION trace + 2D specialization + validation), `run_bench`. |
 
 ---
@@ -246,7 +248,7 @@ Known limitations).
 - earlier: the retired module model (M1–M5) — ecosystem/mesh/overlay/shot
   infrastructure carried forward; only the plant-growth core was replaced.
 
-**27 tests pass.** The `plant.rs` mechanism suite verifies the equations directly
+**30 tests pass.** The `plant.rs` mechanism suite verifies the equations directly
 (BH split, `n=⌊v⌋`, basipetal light, pipe model √Σd², shedding, senescence, vigor
 conservation, growth bounded). `ecosystem.rs` tests cover the emergent properties
 (2D climate specialization — multi-seed since the established cohort is small/

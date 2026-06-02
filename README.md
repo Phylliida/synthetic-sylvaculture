@@ -59,7 +59,7 @@ On NixOS the windowing libraries are provided via `shell.nix`:
 ./run.sh                 # single-plant viewer (cycle the archetype species)
 cargo run -- --stats     # headless: evolution trace, 2D specialization, validation
 cargo run --release -- --bench   # headless performance benchmark (sim + mesh)
-cargo test --release     # 27 tests (CPU)
+cargo test --release     # 30 tests (CPU)
 ./run.sh --tree 6 --steps 200 --shot t.png                 # one archetype, framed
 ./run.sh --shot e.png --temp 26 --precip 320 --steps 170   # an ecosystem frame
 ```
@@ -67,7 +67,8 @@ cargo test --release     # 27 tests (CPU)
 **Ecosystem controls:** Space play/pause · S step · R reseed · F foliage · ←/→
 temperature · ↑/↓ precipitation · −/= shrink/grow the plot · PageDown/PageUp
 lower/raise the growth ceiling · or click the labelled Whittaker biome chart
-(top-left). Mouse orbits/zooms.
+(top-left). A **floor-light heatmap** (top-right) shows how much light reaches
+the floor (dark = shaded, bright = sun). Mouse orbits/zooms.
 
 ## Performance
 
