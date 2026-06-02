@@ -98,12 +98,17 @@ tip carries a terminal bud). `Plant::new(params, origin)`. Each step:
    - **`Wood`** (ecosystem): one **shared, persistent** field; occupancy is
      recomputed each step against current wood (a voxel set), so a dead plant's
      space reopens for neighbours and recruits.
-   Each bud (`BudQuery`) has a reveal **ceiling** (rises with age, capped at the
-   species height) and a **crown-radius** bound (fills a species-sized cylinder,
-   competes in overlaps — no bare limbs racing into open space). A free marker
-   goes to the nearest perceiving bud (within r, a forward cone); the bud's
-   growth direction `V` is the sum of marker directions. `Q` = space-presence ×
-   global-shadow light `g`.
+   Each bud (`BudQuery`) has a reveal **ceiling** and a **crown-radius** bound —
+   a cylinder it competes within (no bare limbs racing into open space). The
+   cylinder is **space-responsive** (`crown_radius()` / `reveal_ceiling()`): the
+   genome envelope is the *young* crown, and the potential crown grows with
+   maturity (age/p_max) toward ~1.8× radius × 1.3× height — but the tree only
+   *fills* it where free markers exist, so a gap/open tree spreads and rises into
+   old age, a crowded one stays bounded, and a survivor expands into a dead
+   neighbour's freed space (this is what gives self-thinning ≈ −1.25 and lets old
+   crowns spread). A free marker goes to the nearest perceiving bud (within r, a
+   forward cone); the bud's growth direction `V` is the sum of marker directions.
+   `Q` = space-presence × global-shadow light `g`.
 2. **light pass** — `Q` accumulates basipetally → `Q_acc`.
 3. **vigor pass** — resource `v = α·Q_base` flows acropetally, split by extended
    Borchert–Honda: `vm = v·λQm/(λQm+(1−λ)Ql)`, `vl = …`.
@@ -226,14 +231,12 @@ it was never told:
 - **Pipe-model allometry** (Eq. 8): trunk diameter vs leaf count → log-log slope
   **≈ 0.51** (predicted 0.50; diameter ∝ √leaves). Holds.
 - **Self-thinning** (Yoda's −3/2 law): a dense even-aged **monoculture**
-  (`Ecosystem::monoculture`, seeding off) thins while mean biomass rises (the
-  right *sign*), but the slope is currently **≈ −1.13**, *shallower* than the
-  ideal −1.5. Honest reason: our **crown envelopes are fixed per genome**, so a
-  survivor can't expand into a dead neighbour's freed space — its biomass caps at
-  its envelope, so the stand doesn't gain enough biomass as it thins.
-  **Space-responsive envelopes** (future work) would steepen it toward −1.5. (An
-  earlier random-genome version of this test read ≈ −1.5, but a monoculture — the
-  law's actual premise — is the honest measurement.)
+  (`Ecosystem::monoculture`, seeding off) thins while mean biomass rises → slope
+  **≈ −1.25** (ideal −1.5). With **space-responsive crowns** (below) survivors
+  expand into freed space as the stand thins, so mean biomass keeps climbing
+  (~0.04 → ~1.2) instead of plateauing — the right −3/2 behaviour. The residual to
+  −1.5 is the early establishment crash (mass seedling die-off) + discrete
+  sampling, not the old fixed-envelope cap.
 
 ---
 
@@ -341,8 +344,9 @@ What to tune:
    `--tree` a *somewhat unreliable* tuning instrument — judge species character,
    not perfect symmetry. In the ecosystem (`Wood` mode, all-sides competition)
    trees are more balanced.
-4. **Self-thinning is ≈ −1.13, not −1.5** — fixed crown envelopes don't expand
-   into freed space (see Validation). A real residual, not a bug.
+4. **Self-thinning is ≈ −1.25, not −1.5** — the residual is the early
+   establishment crash + discrete sampling, not the old fixed-envelope cap
+   (crowns are now space-responsive; see Validation).
 5. **Parameter fragility** — see the Rigor caveat above. Many eye-tuned constants;
    the emergent ecosystem can shift with any of them. Re-run `--stats` after edits.
 6. **Naming debt**: `term_resource` now also carries the relay's main share;
@@ -363,9 +367,6 @@ What to tune:
   proto, per-instance transforms), or (c) **rebuild/upload only when changed**
   (every N steps, or only dirty plants). Instrument `run_ecosystem` to measure
   real frame time first.
-- **Space-responsive envelopes** — let a survivor's crown envelope expand into a
-  dead neighbour's freed space; this is what would steepen self-thinning toward
-  the −1.5 ideal (fixed envelopes cap it at ≈ −1.13).
 - **Terrain + elevation lapse rate** `T(h)=T(0)+γh` → **treelines** (Makowski
   Sec. 6.4). The biggest remaining paper feature and a clean fit (climate is
   already mechanistic). Plus a **soil/blocked map** (exclude water/rock/roads).

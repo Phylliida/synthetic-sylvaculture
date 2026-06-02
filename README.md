@@ -41,8 +41,9 @@ specializing biome is *seen* to converge.
 
 Validation it was never told (`--stats`): **pipe-model allometry** (diameter ∝
 √leaves, log-log slope ≈ 0.51 ✓). **Yoda's self-thinning** has the right sign but
-is currently ≈ −1.13, shallower than the ideal −1.5 — fixed crown envelopes don't
-expand into freed space (see `HANDOFF.md`).
+is ≈ −1.25 (ideal −1.5) — survivors expand into freed space as the stand thins
+(space-responsive crowns); the residual is the establishment crash (see
+`HANDOFF.md`).
 
 See **`HANDOFF.md`** for the full orientation map (architecture, the genome,
 parameters, validation, performance, and gotchas).
