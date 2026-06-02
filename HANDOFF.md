@@ -150,6 +150,41 @@ value is the young crown; it grows with maturity — see step 1), not by λ.
 Determinacy `D` does double duty (coherently): branch *angle* (high D narrow, low
 D wide) **and** monopodial↔sympodial (see step 5).
 
+### Light & sun (the shadow model — and why it's vertical)
+
+The sun is **vertical** (light from above), via Pałubicki's downward
+shadow-propagation grid (`ShadowGrid`, ecosystem) / `self_shadow` (standalone):
+each occupied voxel adds a downward pyramidal penumbra `Δs = a·b^−q` (`a=1`,
+`b=2`, `qmax=6`), and a point's light is `Q = max(C − s + a, 0)/C` (`C=8`). Read
+in reverse this **already integrates occlusion over an upward ~45° cone** — i.e.
+a crude zenith-weighted hemisphere of diffuse sky light (which is why the
+floor-light heatmap reads like ambient occlusion). Neither paper has a moving or
+angled sun; climate is *annual-averaged*.
+
+- **Occlusion is partial and cumulative, not per-branch opaque.** The first unit
+  of shadow is free (`s ≤ 1` ⇒ `Q = 1`), and one module adds only `a·b^−q` (≤1),
+  so a *single* branch barely dims the light; blackout needs `s ≥ 9` ≈ many
+  stacked modules. So per-branch the canopy is already very *leaky* — the dark
+  floor under a dense crown is the sum of dozens of modules, not any one being
+  solid. (Real forest floors get only ~1–5% of full sun, so "dark" is realistic.)
+  The canopy-leakiness knob is `a`/`C` — but it is **load-bearing**: it sets the
+  strength of light *competition* (self-thinning, succession), so changing it
+  re-selects the evolved forest. Treat like any light-model change (below).
+- **Hemispherical sun — tried & reverted.** An explicit "all angles, most at top"
+  model (a strong zenith deposit + a ring of 4 oblique deposits, weights summing
+  to 1 so uniform-canopy darkness is preserved) was built and measured. Even
+  tuned gentle (zenith 0.80 / obliques 0.05) it was a **net loss**: the oblique
+  side-light biased branch vigor toward gaps (the banana-arc pathology returned
+  at full strength), and at *settled* horizons it **halved the climate-
+  specialization contrast** (tropical-vs-boreal crown breadth 3.5→1.6) and
+  **suppressed the tropical thicket understory** (basitony 0.57→0.05). Same
+  side-lighting mechanism drove both the prettier softer floor shadows *and* the
+  harm → no sweet spot. The vertical model is the right fit; see the `ShadowGrid`
+  doc comment. **General lesson:** the light model is the load-bearing wall of the
+  sim — even a *scale-neutral* change to its angular structure re-selects the
+  evolved equilibria. Change it only with a settled-horizon `--stats` + a revert
+  plan.
+
 ### Ecosystem (Sec. 6) — now EVOLUTIONARY, no fixed species
 
 Each plant carries a `Genome` (`genome.rs`); the `Ecosystem` stores one per plant
@@ -226,7 +261,8 @@ branch-shape fix (default-orientation term, killed the wiggle) and the perf work
 (below) predate this. Reverted as destabilizing/infeasible in this model: ongoing
 per-segment tropism (weeps long branches); a tolerance→flowering-light discount
 meant to sustain an understory shrub layer (it collapsed a marginal biome — see
-Known limitations).
+Known limitations); an explicit **hemispherical sun** (zenith + oblique deposits,
+"light from all angles, most at top") — see the **Light & sun** note below.
 
 **Earlier (the self-organizing rewrite + perf), recent first:**
 
