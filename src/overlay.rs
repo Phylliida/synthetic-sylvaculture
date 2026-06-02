@@ -101,6 +101,7 @@ fn glyph(c: char) -> [u8; 7] {
         'E' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
         'F' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000],
         'G' => [0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111],
+        'H' => [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
         'I' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111],
         'L' => [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111],
         'M' => [0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001],
@@ -230,6 +231,104 @@ pub fn build_chart(vp: Viewport, temp: f32, precip: f32) -> CpuMesh {
     }
 }
 
+// --- floor-light heatmap (top-right) ----------------------------------------
+
+/// Heatmap rectangle (the CELL area) in screen pixels, top-left origin, anchored
+/// to the top-RIGHT corner. A title strip is drawn just above it. Square, since
+/// the plot is square.
+pub fn heatmap_rect(vp: Viewport) -> (f32, f32, f32, f32) {
+    let margin = 18.0;
+    let w = 210.0_f32.min(vp.width as f32 * 0.26);
+    let h = w;
+    let x0 = vp.width as f32 - margin - w;
+    let y0 = margin + 22.0; // leave a title row above
+    (x0, y0, w, h)
+}
+
+/// Colour ramp for a floor-light value ∈ [0,1]: a heat/inferno-style gradient —
+/// deep shade reads dark indigo, full sun bright pale-yellow.
+fn light_color(l: f32) -> [u8; 3] {
+    let l = l.clamp(0.0, 1.0);
+    const STOPS: [(f32, [f32; 3]); 4] = [
+        (0.0, [18.0, 16.0, 40.0]),    // fully shaded — dark indigo
+        (0.40, [110.0, 38.0, 92.0]),  // purple
+        (0.70, [226.0, 110.0, 50.0]), // orange
+        (1.0, [255.0, 240.0, 150.0]), // full sun — pale yellow
+    ];
+    let mut c = STOPS[STOPS.len() - 1].1;
+    for w in STOPS.windows(2) {
+        let (a, ca) = w[0];
+        let (b, cb) = w[1];
+        if l <= b {
+            let t = if b > a { (l - a) / (b - a) } else { 0.0 };
+            c = [
+                ca[0] + (cb[0] - ca[0]) * t,
+                ca[1] + (cb[1] - ca[1]) * t,
+                ca[2] + (cb[2] - ca[2]) * t,
+            ];
+            break;
+        }
+    }
+    [c[0] as u8, c[1] as u8, c[2] as u8]
+}
+
+/// Build the floor-light heatmap overlay: an n×n grid of cells (row-major, row =
+/// z, col = x; matching `Ecosystem::floor_light_grid`) coloured by how much light
+/// reaches the floor, with a title and a shade→sun legend strip. Vertex-coloured,
+/// unlit — render with the same overlay material/camera as `build_chart`.
+pub fn build_floor_light(vp: Viewport, grid: &[f32], n: usize) -> CpuMesh {
+    let (x0, y0, w, h) = heatmap_rect(vp);
+    let vh = vp.height as f32;
+
+    let mut positions: Vec<Vector3<f32>> = Vec::new();
+    let mut colors: Vec<Srgba> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    macro_rules! quad {
+        ($sx:expr, $sy:expr, $sw:expr, $sh:expr, $c:expr) => {
+            push_quad(&mut positions, &mut colors, &mut indices, vh, $sx, $sy, $sw, $sh, $c)
+        };
+    }
+
+    // Background panel / frame (covers the title strip, the grid, and the legend).
+    let legend_h = 10.0;
+    quad!(x0 - 6.0, y0 - 28.0, w + 12.0, h + 28.0 + legend_h + 14.0, [26, 28, 34]);
+
+    // Title.
+    let s = (w / 210.0 * 1.1).max(0.9);
+    push_text(&mut positions, &mut colors, &mut indices, vh, x0 + w / 2.0, y0 - 14.0, s, "FLOOR LIGHT");
+
+    // Heatmap cells.
+    if n > 0 {
+        let cw = w / n as f32;
+        let ch = h / n as f32;
+        for j in 0..n {
+            for i in 0..n {
+                let l = grid.get(j * n + i).copied().unwrap_or(1.0);
+                quad!(x0 + i as f32 * cw, y0 + j as f32 * ch, cw + 0.6, ch + 0.6, light_color(l));
+            }
+        }
+    }
+
+    // Legend: a shade→sun gradient strip under the grid.
+    let ly = y0 + h + 6.0;
+    let segs = 24usize;
+    let sw = w / segs as f32;
+    for k in 0..segs {
+        let l = (k as f32 + 0.5) / segs as f32;
+        quad!(x0 + k as f32 * sw, ly, sw + 0.6, legend_h, light_color(l));
+    }
+    // "SHADE" (left) and "SUN" (right) ticks under the legend.
+    push_text(&mut positions, &mut colors, &mut indices, vh, x0 + w * 0.16, ly + legend_h + 6.0, s * 0.8, "SHADE");
+    push_text(&mut positions, &mut colors, &mut indices, vh, x0 + w * 0.86, ly + legend_h + 6.0, s * 0.8, "SUN");
+
+    CpuMesh {
+        positions: Positions::F32(positions),
+        indices: Indices::U32(indices),
+        colors: Some(colors),
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,6 +373,27 @@ mod tests {
                 assert_ne!(glyph(ch), [0u8; 7], "no glyph for '{ch}' in label {label:?}");
             }
         }
+    }
+
+    #[test]
+    fn heatmap_text_letters_have_glyphs() {
+        // The floor-light overlay draws these words; guard against the
+        // missing-glyph bug (e.g. 'H' was absent until the heatmap added it).
+        for word in ["FLOOR LIGHT", "SHADE", "SUN"] {
+            for ch in word.chars() {
+                if ch == ' ' {
+                    continue;
+                }
+                assert_ne!(glyph(ch), [0u8; 7], "no glyph for '{ch}' in heatmap text");
+            }
+        }
+    }
+
+    #[test]
+    fn light_color_runs_dark_to_bright() {
+        // Shaded end is darker (lower luminance) than the sunlit end.
+        let lum = |c: [u8; 3]| c[0] as u32 + c[1] as u32 + c[2] as u32;
+        assert!(lum(light_color(0.0)) < lum(light_color(1.0)));
     }
 
     #[test]

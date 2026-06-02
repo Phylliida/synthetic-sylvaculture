@@ -837,6 +837,38 @@ impl Ecosystem {
         (shrub, tree)
     }
 
+    /// How much light reaches the FLOOR across the plot, for the viewer's
+    /// heatmap. Builds the shadow grid from the current stand and reads
+    /// `light_at` at ground level on an `n`×`n` grid over [−size, size]².
+    /// Row-major: row = z index, col = x index (matching `overlay::build_floor_
+    /// light`). Each value ∈ [0,1] (1 = full sun, 0 = fully shaded). Returns
+    /// all-1.0 when shadowing is off (every floor point is then fully lit).
+    pub fn floor_light_grid(&self, n: usize) -> Vec<f32> {
+        if n == 0 {
+            return Vec::new();
+        }
+        if !self.shadow_enabled {
+            return vec![1.0; n * n];
+        }
+        let wood: Vec<Vec3> = self
+            .plants
+            .iter()
+            .flat_map(|p| p.module_centres().into_iter().map(|(_, c)| c))
+            .collect();
+        let mut grid = ShadowGrid::new(self.size, self.field_height, 1.5);
+        grid.deposit_binned(&wood);
+        let span = 2.0 * self.size;
+        let mut out = vec![0.0f32; n * n];
+        for j in 0..n {
+            for i in 0..n {
+                let x = -self.size + (i as f32 + 0.5) / n as f32 * span;
+                let z = -self.size + (j as f32 + 0.5) / n as f32 * span;
+                out[j * n + i] = grid.light_at(vec3(x, 0.0, z));
+            }
+        }
+        out
+    }
+
     pub fn plant_count(&self) -> usize {
         self.plants.len()
     }
@@ -1032,6 +1064,20 @@ mod tests {
             shaded.total_modules(),
             lit.total_modules()
         );
+    }
+
+    #[test]
+    fn floor_light_grid_is_sane() {
+        let mut eco = grown(Climate { temp: 24.0, precip: 300.0 }, 90);
+        let g = eco.floor_light_grid(16);
+        assert_eq!(g.len(), 16 * 16);
+        assert!(g.iter().all(|&l| (0.0..=1.0).contains(&l)), "light out of [0,1]");
+        // A grown stand must shade SOME of its floor (not all full light).
+        assert!(g.iter().any(|&l| l < 0.9), "a grown stand should shade some floor");
+        // With shadowing off, every floor point is fully lit.
+        eco.shadow_enabled = false;
+        let g2 = eco.floor_light_grid(16);
+        assert!(g2.iter().all(|&l| (l - 1.0).abs() < 1e-6), "no shadow ⇒ floor fully lit");
     }
 
     #[test]

@@ -24,6 +24,9 @@ fn make_plant(params: PlantParams) -> Plant {
     Plant::new(params, gvec3(0.0, 0.0, 0.0))
 }
 
+/// Resolution of the floor-light heatmap overlay (n×n cells over the plot).
+const HEATMAP_N: usize = 28;
+
 fn make_bark(context: &Context, rgb: (u8, u8, u8)) -> PhysicalMaterial {
     let mut m = PhysicalMaterial::new_opaque(
         context,
@@ -429,12 +432,17 @@ fn render_shot(context: &Context, eco: &Ecosystem, climate: Climate, w: u32, h: 
     let cam2d = Camera::new_2d(viewport);
     let chart = Gm::new(
         Mesh::new(context, &overlay::build_chart(viewport, climate.temp, climate.precip)),
+        overlay_mat.clone(),
+    );
+    let heat = Gm::new(
+        Mesh::new(context, &overlay::build_floor_light(viewport, &eco.floor_light_grid(HEATMAP_N), HEATMAP_N)),
         overlay_mat,
     );
 
     target.clear(ClearState::color_and_depth(0.62, 0.74, 0.90, 1.0, 1.0));
     target.render(&camera, ground.into_iter().chain(&trunks).chain(&foliage), &[&ambient, &key, &fill]);
     target.render(&cam2d, &chart, &[] as &[&dyn Light]);
+    target.render(&cam2d, &heat, &[] as &[&dyn Light]);
     target.read_color::<[u8; 4]>()
 }
 
@@ -820,6 +828,9 @@ fn run_ecosystem() {
 
     let mut trunks = Gm::new(build_trunks(&eco, &context), wood.clone());
     let mut foliage = Gm::new(build_foliage(&eco, &context), leaf.clone());
+    // Floor-light heatmap data (recomputed only when the stand changes; the cheap
+    // overlay mesh is rebuilt each frame from it so it tracks window resizes).
+    let mut floor_light = eco.floor_light_grid(HEATMAP_N);
 
     let mut playing = true;
     let mut step_count: u32 = 0;
@@ -966,6 +977,7 @@ fn run_ecosystem() {
         if dirty {
             trunks.geometry = build_trunks(&eco, &context);
             foliage.geometry = build_foliage(&eco, &context);
+            floor_light = eco.floor_light_grid(HEATMAP_N);
             if step_count % 10 == 0 || !playing {
                 println!(
                     "  step {:>4}  plants {:>3}  modules {:>5}",
@@ -984,13 +996,19 @@ fn run_ecosystem() {
             screen.render(&camera, ground.into_iter().chain(&trunks), &[&ambient, &key, &fill]);
         }
 
-        // 2D biome-chart overlay (drawn on top via DepthTest::Always).
+        // 2D overlays (drawn on top via DepthTest::Always): the biome chart
+        // (top-left) and the floor-light heatmap (top-right).
         let cam2d = Camera::new_2d(vp);
         let chart = Gm::new(
             Mesh::new(&context, &overlay::build_chart(vp, climate.temp, climate.precip)),
             overlay_mat.clone(),
         );
         screen.render(&cam2d, &chart, &[] as &[&dyn Light]);
+        let heat = Gm::new(
+            Mesh::new(&context, &overlay::build_floor_light(vp, &floor_light, HEATMAP_N)),
+            overlay_mat.clone(),
+        );
+        screen.render(&cam2d, &heat, &[] as &[&dyn Light]);
 
         FrameOutput::default()
     });
