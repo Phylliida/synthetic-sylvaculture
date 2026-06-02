@@ -76,11 +76,11 @@ looks like a geometry bug).
 
 | File | What |
 |---|---|
-| `src/plant.rs` | The core. `Plant` (metamers + terminal/lateral/**relay** buds; `live` counter + min-heap free-list back `module_count`/`alloc`), the growth cycle, **sympodial relay** (`relay_bud`, `relay_direction`), **age-dependent apical control** (relaxed λ in `vigor_pass`) and **space-responsive crown** (`maturity`, `crown_radius`, expanding `reveal_ceiling`), the `colonize`/`Occ`/`BudQuery`/`PointGrid`/`DenseOcc` space-colonization core, `FxHasher`/`pack` voxel hashing, `hash01` (deterministic bud-fate), self-shadow, shedding, **memoryful** pipe-model diameters (never shrink), `health` (crown-tip carbon), `root_vigor`, geometry queries. |
-| `src/genome.rs` | **The evolving genome.** **18** heritable traits (morphology + life-history incl. `lifespan` and `apical_relax`); `random` (founders), `mutated` (heritable seeds), `to_params` (derives marker/module budget from the *expanded* crown volume), `niche` (behaviour descriptor for frequency-dependence), `leaf_rgb`/`bark_rgb` (colour *from* the genome → watch a biome converge). |
+| `src/plant.rs` | The core. `Plant` (metamers + terminal/lateral/**relay** buds; `live` counter + min-heap free-list back `module_count`/`alloc`), the growth cycle, **sympodial relay** (`relay_bud`, `relay_direction`), **age-dependent apical control** (relaxed λ in `vigor_pass`), **space-responsive crown** (`maturity`, `crown_radius`, expanding `reveal_ceiling`), **basitony** (basal laterals up-right into a multi-stem bush, in `lateral_direction`), the `colonize`/`Occ`/`BudQuery`/`PointGrid`/`DenseOcc` space-colonization core, `FxHasher`/`pack` voxel hashing, `hash01` (deterministic bud-fate), self-shadow, shedding, **memoryful** pipe-model diameters (never shrink), `health` (crown-tip carbon), `root_vigor`, geometry queries. |
+| `src/genome.rs` | **The evolving genome.** **19** heritable traits (morphology + life-history incl. `lifespan`, `apical_relax`, and `basitony` = shrub habit); `random` (founders), `mutated` (heritable seeds), `to_params` (derives marker/module budget from the *expanded* crown volume), `niche` (behaviour descriptor for frequency-dependence), `leaf_rgb`/`foliage_style` (colour *and* broad↔needle leaf shape *from* the genome → watch a biome converge), `bark_rgb`. |
 | `src/species.rs` | 7 plant-type **archetype presets** `preset(λ,D,gp,v_root_max,g2,s_tol,φ,env_h,env_r)` — used ONLY by the single-plant/`--tree` inspector + the morphology tests. The ecosystem evolves genomes, not these. (Climate-niche fields are dead, `#[allow(dead_code)]`.) |
 | `src/ecosystem.rs` | `Ecosystem` (now **genome-based, evolving**): shared marker field (`regenerate_field`, `set_size`/`set_field_height` resize), `ShadowGrid`, `Climate::warmth/water/productivity`, `survival_bar` (2D-climate carbon cost), `cull_dead` (starvation + senescence + **Janzen–Connell** `similar_crowding`), `seed` (inherit+mutate + **seed rain**, vigor-scaled maturity), `mean_traits`/`trait_std`/`established_count`, `step_timed`, parallel grow + mesh gather. |
-| `src/mesh.rs` | Skeleton → generalized-cylinder mesh; foliage quads; **parallel in-place** per-plant-coloured forest mesh (`balanced_ranges`/`carve_mut`/`uninit_vec` → prefix-sum slice fill, no concat). |
+| `src/mesh.rs` | Skeleton → generalized-cylinder mesh; foliage blades (`leaf_blade` morphs broad↔needle per `LeafStyle{rgb,needle}`); **parallel in-place** per-plant-coloured forest mesh (`balanced_ranges`/`carve_mut`/`uninit_vec` → prefix-sum slice fill, no concat). |
 | `src/overlay.rs` | Clickable Whittaker biome chart **with biome name labels** (self-contained 5×7 `glyph` bitmap font + `push_text`); `screen_to_climate`. |
 | `src/main.rs` | Viewers (`run`, `run_ecosystem` with resize keys + unthrottled stepping), `run_tree_shot` (`--tree [--bare]`), `run_shot`, `run_stats` (EVOLUTION trace + 2D specialization + validation), `run_bench`. |
 
@@ -126,7 +126,12 @@ tip carries a terminal bud). `Plant::new(params, origin)`. Each step:
    straight leader); low D → the terminal "flowers"/stops and a **relay bud**
    (separate from the lateral bud, so the tip still side-branches — no
    starvation) takes over as a near-axial leader → a gently zig-zag sympodial,
-   bushier decurrent crown. The relay draws the apical λ share.
+   bushier decurrent crown. The relay draws the apical λ share. **Basitony →
+   multi-stemmed bush:** near the ground a basitonic genome turns its lowest
+   laterals upward (toward vertical) into a clump of co-equal *stems* instead of
+   angled side branches, so high `basitony` + low λ + a short envelope grows a
+   shrub, while `basitony` 0 stays a single trunk (a tree). Only the basal
+   lateral *direction* is changed — the vigor routing is untouched.
 6. **shedding** (§4.4) — a lateral branch whose mean light is below `shed_ratio`
    is dropped → clean boles under shade (shade-tolerant species keep theirs).
 7. **diameters** — pipe model `d = √(Σ d_child²)`, φ at the tips (Eq. 8), so
@@ -178,10 +183,12 @@ specialization emerges from selection:
   *near and niche-similar* neighbours suffers extra mortality (negative
   frequency-dependence = the ecological twin of GA fitness-sharing), so rare
   strategies are protected and a climate doesn't collapse onto one winner.
-- **Colour is derived from the genome** (slenderness → hue, tolerance →
-  brightness), so a specializing biome is *seen* to converge. Measure the
-  *established* cohort (`mean_traits`/`trait_std`/`established_count`), not the
-  transient seedling carpet.
+- **Appearance is derived from the genome** — slenderness → leaf hue *and*
+  broad↔needle leaf **shape** (`foliage_style`: tall-narrow → needle sprays =
+  conifer, short-broad → wide diamonds = broadleaf), tolerance → brightness — so
+  a specializing biome is *seen* to converge in colour *and* foliage form.
+  Measure the *established* cohort (`mean_traits`/`trait_std`/`established_count`,
+  `stratum_counts` for the shrub/tree split), not the transient seedling carpet.
 
 ---
 
@@ -196,11 +203,17 @@ Connell** frequency-dependence for diversity; genome-derived colour; **sympodial
 branching** via a relay bud; **vigor-scaled maturity**; **age-dependent apical
 control** (λ relaxes young→old); **space-responsive crowns** (the elastic envelope
 that lifted self-thinning to ≈ −1.25 and lets old crowns spread); **memoryful
-pipe-model diameters** (never shrink on shedding — a paper-accuracy fix). Viewer:
+pipe-model diameters** (never shrink on shedding — a paper-accuracy fix);
+**emergent foliage morphology** (broad↔needle leaf shape from genome slenderness —
+conifers grow needle sprays, broadleaves wide leaves); **bushes** (a heritable
+`basitony` trait — the 19th — that up-rights basal laterals into a multi-stemmed
+shrub clump, plus a lowered height floor so short shrubs are reachable). Viewer:
 in-place **resize** keys, **unthrottled** stepping, **biome labels**. The
 branch-shape fix (default-orientation term, killed the wiggle) and the perf work
-(below) predate this. Reverted as infeasible in this model: ongoing per-segment
-tropism (weeps long branches).
+(below) predate this. Reverted as destabilizing/infeasible in this model: ongoing
+per-segment tropism (weeps long branches); a tolerance→flowering-light discount
+meant to sustain an understory shrub layer (it collapsed a marginal biome — see
+Known limitations).
 
 **Earlier (the self-organizing rewrite + perf), recent first:**
 
@@ -310,11 +323,12 @@ morphology, and the validation fits. Tune by reading the numbers **and** a
 
 What to tune:
 - **Genome trait ranges** (`genome.rs` `RANGES`) — the evolvable bounds for all
-  **18** traits (λ, determinacy, α, gp, v_root_max, g2, tropism_up, ξ, φ,
-  shade_tolerance, shed_ratio, env_h, env_r, flowering_age, seed_radius,
-  seed_freq, lifespan, **apical_relax**). Founders draw uniform here; mutation
-  clamps here. (Append new traits LAST — the `--stats` key + tests index by
-  position.)
+  **19** traits (λ, determinacy, α, gp, v_root_max, g2, tropism_up, ξ, φ,
+  shade_tolerance, shed_ratio, env_h *(floor 1.5 m — shrubs)*, env_r,
+  flowering_age, seed_radius, seed_freq, lifespan, **apical_relax**,
+  **basitony** *(shrub habit)*). Founders draw uniform here; mutation clamps
+  here. (Append new traits LAST — the `--stats` key + the [f32;19] aggregations
+  index by position.)
 - **Ecosystem constants** (`ecosystem.rs`): the **2D-climate carbon** consts
   `MAINT_BASE`/`MAINT_VOL`/`MAINT_BREADTH`/`MAINT_FULL_VOL`; `FLOWER_LIGHT`
   (reproduce-only-when-lit threshold); the **Janzen–Connell** `JC_RADIUS`/
@@ -386,6 +400,16 @@ What to tune:
   already mechanistic). Plus a **soil/blocked map** (exclude water/rock/roads).
 - **Robustness pass** — sweep the eye-tuned constants across seeds; turn the
   ad-hoc tuning into measured distributions (see the Rigor caveat).
+- **A self-sustaining understory shrub layer.** Bushes (`basitony`) now evolve
+  and short shrubs are reachable, but short plants rarely *establish* under a
+  canopy: a shaded short plant survives (tolerance lowers its bar) yet can't reach
+  `FLOWER_LIGHT` to breed, so the shrub stratum stays sparse except in open/edge/
+  gap biomes (honestly realistic, but a denser understory would be nice). A
+  bounded tolerance→flowering-light discount was tried and **reverted** — it
+  added a boreal shrub stratum but collapsed a marginal biome (subtropical desert
+  → 0 established on one seed); too much added sensitivity (the sprout-collapse
+  Rigor caveat). A safer route would decouple the understory recruit from the
+  global rule (e.g. a separate gap-detection / light-stratified recruitment).
 - **Other paper gaps** (from the two-paper audit): **disturbance** (fire/wind →
   succession reset), a **grass/forb understory** layer, **flowering changes λ/D**
   (mature-form change, e.g. Baobab), the Pałubicki **priority** bud-fate model.

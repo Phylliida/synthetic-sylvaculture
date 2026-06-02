@@ -29,8 +29,10 @@ by evolving genomes, not by hand-tuned species.
 colonization**); light flows basipetally and **vigor** flows back up, split by the
 extended **Borchert–Honda** rule (apical control λ spans excurrent ↔ decurrent);
 a bud sprouts `⌊v⌋` metamers (length ∝ vigor); **determinacy** sets monopodial vs
-**sympodial** (relay) branching; shaded branches are **shed**; **pipe-model**
-diameters give trunk ∝ √(leaf count).
+**sympodial** (relay) branching and **basitony** sets single-trunk tree vs
+multi-stemmed **bush**; shaded branches are **shed**; **pipe-model** diameters
+give trunk ∝ √(leaf count). Leaf **shape** (broad ↔ needle) and colour both
+follow the genome, so conifers grow needle sprays and broadleaves wide leaves.
 
 *Across the ecosystem:* a shadow grid gives inter-plant shading; a 2D **climate**
 (warmth → growth & crown shape, water → crown size) sets who can pay their carbon
