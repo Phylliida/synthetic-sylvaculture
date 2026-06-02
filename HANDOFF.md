@@ -155,21 +155,27 @@ D wide) **and** monopodial↔sympodial (see step 5).
 The sun is **vertical** (light from above), via Pałubicki's downward
 shadow-propagation grid (`ShadowGrid`, ecosystem) / `self_shadow` (standalone):
 each occupied voxel adds a downward pyramidal penumbra `Δs = a·b^−q` (`a=1`,
-`b=2`, `qmax=6`), and a point's light is `Q = max(C − s + a, 0)/C` (`C=8`). Read
+`b=2`, `qmax=6`), and a point's light is `Q = max(C − s + a, 0)/C` (`C=11`). Read
 in reverse this **already integrates occlusion over an upward ~45° cone** — i.e.
 a crude zenith-weighted hemisphere of diffuse sky light (which is why the
 floor-light heatmap reads like ambient occlusion). Neither paper has a moving or
 angled sun; climate is *annual-averaged*.
 
 - **Occlusion is partial and cumulative, not per-branch opaque.** The first unit
-  of shadow is free (`s ≤ 1` ⇒ `Q = 1`), and one module adds only `a·b^−q` (≤1),
-  so a *single* branch barely dims the light; blackout needs `s ≥ 9` ≈ many
-  stacked modules. So per-branch the canopy is already very *leaky* — the dark
-  floor under a dense crown is the sum of dozens of modules, not any one being
-  solid. (Real forest floors get only ~1–5% of full sun, so "dark" is realistic.)
-  The canopy-leakiness knob is `a`/`C` — but it is **load-bearing**: it sets the
-  strength of light *competition* (self-thinning, succession), so changing it
-  re-selects the evolved forest. Treat like any light-model change (below).
+  of shadow is free (`s ≤ a=1` ⇒ `Q = 1`), and one module adds only `a·b^−q`
+  (≤1), so a *single* branch barely dims the light; blackout needs `s ≥ C+a`
+  (=12) ≈ many stacked modules. So per-branch the canopy is already very *leaky*
+  — the dark floor under a dense crown is the sum of dozens of modules, not any
+  one being solid. (Real forest floors get only ~1–5% of full sun, so "dark" is
+  realistic.) **`C` is the canopy-leakiness knob** (higher ⇒ a denser column is
+  needed to darken the floor ⇒ leakier); it was raised 8→11 for a brighter,
+  dapplier floor. It is **load-bearing** (it also sets the strength of light
+  *competition* — self-thinning, succession), but the floor-brightening is the
+  only *robust* effect: the apparent shifts in the shrub stratum and self-thinning
+  slope across `C`∈{8,9,11} turned out to be within **single-seed noise** (the
+  understory got *more* shrubs at 9, fewer at 11 — not monotonic), so `C` is an
+  aesthetic dial, not a tuned ecological optimum. Validation held at 11. Dial it
+  freely, but judge any ecological claim multi-seed at settled horizons.
 - **Hemispherical sun — tried & reverted.** An explicit "all angles, most at top"
   model (a strong zenith deposit + a ring of 4 oblique deposits, weights summing
   to 1 so uniform-canopy darkness is preserved) was built and measured. Even
