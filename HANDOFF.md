@@ -328,9 +328,17 @@ since then mean it is not byte-identical to that historical number.)
 
 `--stats` prints: an **EVOLUTION** trace (mean genome over a long temperate run —
 watch it converge / churn), **2D specialization** across the four Whittaker
-corners (evolved means + diversity σ + established count), per-archetype
-morphology, and the validation fits. Tune by reading the numbers **and** a
-`--tree`/`--shot` PNG.
+corners (evolved means + diversity σ + established + shrub/tree strata),
+per-archetype morphology, and the validation fits. Tune by reading the numbers
+**and** a `--tree`/`--shot` PNG.
+
+> **Timescale (important):** a stand takes **~2000–3000 steps to actually settle
+> into its climate-adapted niche** — earlier readings are *transient* and can
+> mislead (this is why this session's short single-seed runs gave jumpy
+> desert/shrub counts). `--stats` therefore runs the EVOLUTION trace to 3000 and
+> each 2D corner to 2400 steps (so the means are settled), which makes a full
+> `--stats` ~**90 s** (the `cargo test` suite is separate, still ~18 s). When you
+> change a constant, judge it at a settled horizon, not at a few hundred steps.
 
 What to tune:
 - **Genome trait ranges** (`genome.rs` `RANGES`) — the evolvable bounds for all

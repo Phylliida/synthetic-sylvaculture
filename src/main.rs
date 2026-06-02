@@ -114,11 +114,13 @@ fn run_stats() {
     };
 
     println!("\necosystem: EVOLUTION (temperate, mean genome over time from random founders):");
+    println!("  (it takes ~2000-3000 steps for the stand to actually SETTLE into its");
+    println!("   climate-adapted niche — earlier rows are still transient)");
     {
         let mut eco = Ecosystem::new(50, 19.0, 4, temperate);
-        for s in 1..=1600 {
+        for s in 1..=3000 {
             eco.step(1.0);
-            if [1, 200, 500, 900, 1300, 1600].contains(&s) {
+            if [1, 500, 1000, 1800, 2400, 3000].contains(&s) {
                 let mut h = eco.plant_heights();
                 h.sort_by(f32::total_cmp);
                 let (med, tall) = if h.is_empty() { (0.0, 0.0) } else { (h[h.len() / 2], *h.last().unwrap()) };
@@ -137,9 +139,10 @@ fn run_stats() {
         }
     }
 
-    println!("\necosystem: 2D SPECIALIZATION — the four Whittaker corners (evolved mean, 450 steps):");
+    println!("\necosystem: 2D SPECIALIZATION — the four Whittaker corners (evolved mean, 2400 steps):");
     println!("  (same random founders + seed; temp & precip stress different traits, so the");
-    println!("   corners diverge in KIND — cold→narrow, warm→broad; dry→small, wet→large)");
+    println!("   corners diverge in KIND — cold→narrow, warm→broad; dry→small, wet→large.");
+    println!("   2400 steps so each corner has SETTLED into its niche, not a transient mean)");
     for clim in [
         Climate { temp: -2.0, precip: 30.0 },  // cold-dry
         Climate { temp: 3.0, precip: 220.0 },  // cold-wet
@@ -147,7 +150,7 @@ fn run_stats() {
         Climate { temp: 26.0, precip: 320.0 }, // warm-wet
     ] {
         let mut eco = Ecosystem::new(60, 19.0, 9, clim);
-        for _ in 0..450 {
+        for _ in 0..2400 {
             eco.step(1.0);
         }
         let traits = eco.mean_traits().map(|m| key(&m)).unwrap_or_else(|| "(nothing established — too harsh)".into());
