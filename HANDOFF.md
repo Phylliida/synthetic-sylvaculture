@@ -79,7 +79,7 @@ looks like a geometry bug).
 | `src/plant.rs` | The core. `Plant` (metamers + terminal/lateral/**relay** buds; `live` counter + min-heap free-list back `module_count`/`alloc`), the growth cycle, **sympodial relay** (`relay_bud`, `relay_direction`), **age-dependent apical control** (relaxed λ in `vigor_pass`), **space-responsive crown** (`maturity`, `crown_radius`, expanding `reveal_ceiling`), **basitony** (basal laterals up-right into a multi-stem bush, in `lateral_direction`), the `colonize`/`Occ`/`BudQuery`/`PointGrid`/`DenseOcc` space-colonization core, `FxHasher`/`pack` voxel hashing, `hash01` (deterministic bud-fate), self-shadow, shedding, **memoryful** pipe-model diameters (never shrink), `health` (crown-tip carbon), `root_vigor`, geometry queries. |
 | `src/genome.rs` | **The evolving genome.** **19** heritable traits (morphology + life-history incl. `lifespan`, `apical_relax`, and `basitony` = shrub habit); `random` (founders), `mutated` (heritable seeds), `to_params` (derives marker/module budget from the *expanded* crown volume), `niche` (behaviour descriptor for frequency-dependence), `leaf_rgb`/`foliage_style` (colour *and* broad↔needle leaf shape *from* the genome → watch a biome converge), `bark_rgb`. |
 | `src/species.rs` | 7 plant-type **archetype presets** `preset(λ,D,gp,v_root_max,g2,s_tol,φ,env_h,env_r)` — used ONLY by the single-plant/`--tree` inspector + the morphology tests. The ecosystem evolves genomes, not these. (Climate-niche fields are dead, `#[allow(dead_code)]`.) |
-| `src/ecosystem.rs` | `Ecosystem` (now **genome-based, evolving**): shared marker field (`regenerate_field`, `set_size`/`set_field_height` resize), `ShadowGrid`, `Climate::warmth/water/productivity`, `survival_bar` (2D-climate carbon cost), `cull_dead` (starvation + senescence + **Janzen–Connell** `similar_crowding`), `seed` (inherit+mutate + **seed rain**, vigor-scaled maturity), `mean_traits`/`trait_std`/`established_count`, `step_timed`, parallel grow + mesh gather. |
+| `src/ecosystem.rs` | `Ecosystem` (now **genome-based, evolving**): shared marker field (`regenerate_field`, `set_size`/`set_field_height` resize), `ShadowGrid`, `Climate::warmth/water/productivity`, `survival_bar` (2D-climate carbon cost), `cull_dead` (starvation + senescence + **Janzen–Connell** `similar_crowding`), `seed` (inherit+mutate + **seed rain** + **clonal/vegetative spread** for basitonic shrubs, vigor-scaled maturity), `mean_traits`/`trait_std`/`established_count`/`stratum_counts`, `step_timed`, parallel grow + mesh gather. |
 | `src/mesh.rs` | Skeleton → generalized-cylinder mesh; foliage blades (`leaf_blade` morphs broad↔needle per `LeafStyle{rgb,needle}`); **parallel in-place** per-plant-coloured forest mesh (`balanced_ranges`/`carve_mut`/`uninit_vec` → prefix-sum slice fill, no concat). |
 | `src/overlay.rs` | Clickable Whittaker biome chart **with biome name labels** (self-contained 5×7 `glyph` bitmap font + `push_text`); `screen_to_climate`. |
 | `src/main.rs` | Viewers (`run`, `run_ecosystem` with resize keys + unthrottled stepping), `run_tree_shot` (`--tree [--bare]`), `run_shot`, `run_stats` (EVOLUTION trace + 2D specialization + validation), `run_bench`. |
@@ -179,6 +179,14 @@ specialization emerges from selection:
 - **Seed rain**: every step the floor is carpeted with establishment attempts —
   mostly from the proven reproductive pool, plus a small random-immigrant
   fraction — so gaps fill instantly; most seedlings starve, gap ones take hold.
+- **Clonal / vegetative spread** (the shrub strategy): a **basitonic**,
+  established plant puts up a near-clone **sucker** nearby *without needing to
+  flower* (real clonal shrubs: hazel, sumac, aspen), so a basitonic shrub can
+  persist and form a **thicket** in shade where it can't reach flowering light —
+  bypassing the tall-biased seed pool. Keyed on `basitony` only (not light or
+  tolerance), so it gives the shrub guild a foothold without perturbing the
+  flowering rule. This is what fills the low **understory** layer (A/B: with it
+  the stand is a layered forest, without it a sparse scatter of lone trees).
 - **Diversity via Janzen–Connell** (`similar_crowding`): a plant crowded by
   *near and niche-similar* neighbours suffers extra mortality (negative
   frequency-dependence = the ecological twin of GA fitness-sharing), so rare
@@ -207,7 +215,10 @@ pipe-model diameters** (never shrink on shedding — a paper-accuracy fix);
 **emergent foliage morphology** (broad↔needle leaf shape from genome slenderness —
 conifers grow needle sprays, broadleaves wide leaves); **bushes** (a heritable
 `basitony` trait — the 19th — that up-rights basal laterals into a multi-stemmed
-shrub clump, plus a lowered height floor so short shrubs are reachable). Viewer:
+shrub clump, plus a lowered height floor so short shrubs are reachable); **clonal
+/ vegetative spread** (basitonic plants sucker near-clones without flowering →
+a self-sustaining understory thicket layer, bypassing the tall-biased seed pool).
+Viewer:
 in-place **resize** keys, **unthrottled** stepping, **biome labels**. The
 branch-shape fix (default-orientation term, killed the wiggle) and the perf work
 (below) predate this. Reverted as destabilizing/infeasible in this model: ongoing
@@ -333,7 +344,10 @@ What to tune:
   `MAINT_BASE`/`MAINT_VOL`/`MAINT_BREADTH`/`MAINT_FULL_VOL`; `FLOWER_LIGHT`
   (reproduce-only-when-lit threshold); the **Janzen–Connell** `JC_RADIUS`/
   `JC_NICHE_SIGMA`/`JC_MAX`/`JC_HALF` (diversity strength); `SEED_RAIN`/
-  `IMMIGRANT_FRAC`; `CARBON_ESTABLISH`; `max_plants`; `mutation_rate`.
+  `IMMIGRANT_FRAC`; the **clonal-spread** knobs `CLONE_FREQ`/`CLONE_RADIUS`/
+  `CLONE_BASITONY_MIN` (understory thicket density — too high risks a clonal
+  takeover; A/B against `CLONE_FREQ=0`); `CARBON_ESTABLISH`; `max_plants`;
+  `mutation_rate`.
 - **Global plant feel** (`PlantParams`/`plant.rs` consts): `MAX_SHOOT`, `ξ`
   (axis-stiffness, default 0.25 — low = straight/stiff, high = wandering),
   `CROWN_EXPAND_R`/`CROWN_EXPAND_H` (how far the space-responsive crown grows with
@@ -400,16 +414,19 @@ What to tune:
   already mechanistic). Plus a **soil/blocked map** (exclude water/rock/roads).
 - **Robustness pass** — sweep the eye-tuned constants across seeds; turn the
   ad-hoc tuning into measured distributions (see the Rigor caveat).
-- **A self-sustaining understory shrub layer.** Bushes (`basitony`) now evolve
-  and short shrubs are reachable, but short plants rarely *establish* under a
-  canopy: a shaded short plant survives (tolerance lowers its bar) yet can't reach
-  `FLOWER_LIGHT` to breed, so the shrub stratum stays sparse except in open/edge/
-  gap biomes (honestly realistic, but a denser understory would be nice). A
-  bounded tolerance→flowering-light discount was tried and **reverted** — it
-  added a boreal shrub stratum but collapsed a marginal biome (subtropical desert
-  → 0 established on one seed); too much added sensitivity (the sprout-collapse
-  Rigor caveat). A safer route would decouple the understory recruit from the
-  global rule (e.g. a separate gap-detection / light-stratified recruitment).
+- **A distinct SHORT understory shrub stratum.** Mostly addressed: **clonal /
+  vegetative spread** (basitonic plants sucker thickets without flowering) now
+  fills a self-sustaining understory layer (A/B: layered forest vs sparse lone
+  trees). What remains rare is a distinct *short* (env_h<4) stratum — the
+  seed-rain pool is built from reproductive (lit, *tall*) plants, so it's
+  tall-biased and short genomes arrive only as rare immigrants; clonal spread
+  bootstraps the short-basitonic ones that do establish, but a broad short-shrub
+  carpet doesn't form. Reverted along the way: a tolerance-only flowering-light
+  discount (collapsed the marginal desert — too much sensitivity, the
+  sprout-collapse Rigor caveat) and a shortness+tolerance-gated version (desert-
+  safe but **inert** — nothing short enough evolves to use it, because of the
+  seed-pool bias). A real fix for the short carpet would attack that source bias
+  directly (e.g. a short/light-stratified recruit channel), carefully measured.
 - **Other paper gaps** (from the two-paper audit): **disturbance** (fire/wind →
   succession reset), a **grass/forb understory** layer, **flowering changes λ/D**
   (mature-form change, e.g. Baobab), the Pałubicki **priority** bud-fate model.
