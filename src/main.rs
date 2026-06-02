@@ -98,7 +98,7 @@ fn run_stats() {
     }
 
     // Key evolved traits to display (index into Genome::traits()).
-    let key = |m: &[f32; 17]| {
+    let key = |m: &[f32; 18]| {
         format!(
             "env_h {:>4.1}  env_r {:>3.1}  v_root {:>5.1}  shade {:.2}  flower {:>4.1}  seed_f {:.3}  life {:>4.0}",
             m[11], m[12], m[4], m[9], m[13], m[15], m[16]
@@ -308,6 +308,7 @@ fn run_stats() {
             g2: -0.15, tropism_up: 0.30, xi: 0.25, phi: 0.05, shade_tolerance: 0.30,
             shed_ratio: 0.35, envelope_height: 18.0, envelope_radius: 4.0,
             flowering_age: 50.0, seed_radius: 8.0, seed_freq: 0.06, lifespan: 120.0,
+            apical_relax: 0.0,
         };
         let mut eco = Ecosystem::monoculture(220, 14.0, 5, Climate { temp: 12.0, precip: 110.0 }, rep);
         eco.seeding_enabled = false;

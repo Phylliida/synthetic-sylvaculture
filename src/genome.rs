@@ -62,11 +62,15 @@ pub struct Genome {
                             // eventually die and open gaps, so the population
                             // churns and selection keeps compounding. Short =
                             // live-fast-seed-early (r), long = grow-tall-late (K).
+    // (appended last so existing trait indices don't shift)
+    pub apical_relax: f32,  // how much apical control λ relaxes from young→old:
+                            // 0 = keep the leader for life (conifer), high =
+                            // excurrent spire → decurrent spreading crown.
 }
 
 /// Evolvable bounds, in field order. Chosen to span the qualitative morphospace
 /// (Pałubicki Fig. 7/12) without admitting degenerate plants.
-const RANGES: [Range; 17] = [
+const RANGES: [Range; 18] = [
     Range(0.35, 0.65),  // lambda
     Range(0.0, 1.0),    // determinacy
     Range(1.2, 3.0),    // alpha
@@ -86,43 +90,46 @@ const RANGES: [Range; 17] = [
     Range(80.0, 780.0), // lifespan (p_max) — death ≈ 1.9×, so ~152–1480 steps;
                         // long enough that a plant reliably seeds before it dies,
                         // but finite so the canopy still turns over (gap churn).
+    Range(0.0, 0.35),   // apical_relax (appended last; index 17)
 ];
 
 impl Genome {
-    fn as_array(&self) -> [f32; 17] {
+    fn as_array(&self) -> [f32; 18] {
         [
             self.lambda, self.determinacy, self.alpha, self.gp, self.v_root_max,
             self.g2, self.tropism_up, self.xi, self.phi, self.shade_tolerance,
             self.shed_ratio, self.envelope_height, self.envelope_radius,
             self.flowering_age, self.seed_radius, self.seed_freq, self.lifespan,
+            self.apical_relax,
         ]
     }
 
-    fn from_array(a: [f32; 17]) -> Self {
+    fn from_array(a: [f32; 18]) -> Self {
         Genome {
             lambda: a[0], determinacy: a[1], alpha: a[2], gp: a[3], v_root_max: a[4],
             g2: a[5], tropism_up: a[6], xi: a[7], phi: a[8], shade_tolerance: a[9],
             shed_ratio: a[10], envelope_height: a[11], envelope_radius: a[12],
             flowering_age: a[13], seed_radius: a[14], seed_freq: a[15], lifespan: a[16],
+            apical_relax: a[17],
         }
     }
 
     /// The trait vector (field order), for aggregation / readout.
-    pub fn traits(&self) -> [f32; 17] {
+    pub fn traits(&self) -> [f32; 18] {
         self.as_array()
     }
 
     /// Trait names aligned with `traits()` (for `--stats` readout / debugging).
     #[allow(dead_code)]
-    pub const NAMES: [&'static str; 17] = [
+    pub const NAMES: [&'static str; 18] = [
         "lambda", "determ", "alpha", "gp", "v_root_max", "g2", "tropism_up", "xi",
         "phi", "shade_tol", "shed", "env_h", "env_r", "flower_age", "seed_r", "seed_freq",
-        "lifespan",
+        "lifespan", "apical_relax",
     ];
 
     /// A founder: every trait drawn uniformly at random within its range.
     pub fn random(rng: &mut impl Rng) -> Self {
-        let mut a = [0.0f32; 17];
+        let mut a = [0.0f32; 18];
         for (i, r) in RANGES.iter().enumerate() {
             a[i] = r.draw(rng);
         }
@@ -133,7 +140,7 @@ impl Genome {
     /// trait (`rate` ≈ fraction of each trait's span as the step scale).
     pub fn mutated(&self, rate: f32, rng: &mut impl Rng) -> Self {
         let cur = self.as_array();
-        let mut a = [0.0f32; 17];
+        let mut a = [0.0f32; 18];
         for (i, r) in RANGES.iter().enumerate() {
             a[i] = r.jitter(cur[i], rate, rng);
         }
@@ -177,6 +184,7 @@ impl Genome {
             envelope_height: self.envelope_height,
             envelope_radius: self.envelope_radius,
             p_max: self.lifespan, // finite lifespan → senescence → gap churn
+            apical_relax: self.apical_relax, // λ relaxes young→old (Fig. 10/11)
             marker_count: markers,
             max_modules: modules,
             ..PlantParams::default()

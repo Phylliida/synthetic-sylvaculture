@@ -148,7 +148,9 @@ pub fn library() -> Vec<Species> {
         species(
             "oak (broad)",
             // Broad decurrent crown: low λ, wide laterals, pronounced droop.
-            preset(0.47, 0.32, 1.0, 95.0, -0.22, 0.45, 0.052, 8.0, 6.0),
+            // Broadleaf: apical control relaxes with age (young leader → old
+            // spreading crown). Conifer/poplar keep theirs (apical_relax 0).
+            PlantParams { apical_relax: 0.18, ..preset(0.47, 0.32, 1.0, 95.0, -0.22, 0.45, 0.052, 8.0, 6.0) },
             (80, 130, 55), (92, 72, 55),
             15.0, 115.0, 10.0, 90.0, 70.0, 5.0, 0.035, 320.0,
         ),
@@ -175,6 +177,7 @@ pub fn library() -> Vec<Species> {
                 max_modules: 2500,
                 marker_count: 2500,
                 v_root_max: 200.0,
+                apical_relax: 0.22, // excurrent spire when young → spreading canopy old
                 ..preset(0.55, 0.45, 1.0, 200.0, -0.20, 0.55, 0.060, 30.0, 6.0)
             },
             (54, 150, 58), (95, 75, 55),

@@ -72,6 +72,12 @@ pub struct PlantParams {
     /// main axis (excurrent), λ<0.5 to the lateral (decurrent). The expressive
     /// range sits near 0.5 (Pałubicki Fig. 7).
     pub lambda: f32,
+    /// Age-dependent apical control (Pałubicki Fig. 10/11; Makowski λ→λ_mature):
+    /// the *effective* λ relaxes from `lambda` toward `lambda - apical_relax` as
+    /// the plant matures (age → p_max), so a tree can be excurrent (a strong
+    /// single leader) when young and decurrent (spreading crown) when old. 0 =
+    /// constant λ for life (e.g. a conifer keeps its leader). See `vigor_pass`.
+    pub apical_relax: f32,
     /// Resource coefficient α: total resource v_base = α·Q_base (Pałubicki §4.2,
     /// typically ≈2). More α → longer shoots (n = ⌊v⌋) → denser, faster trees.
     pub alpha: f32,
@@ -143,6 +149,7 @@ impl Default for PlantParams {
     fn default() -> Self {
         Self {
             lambda: 0.52,
+            apical_relax: 0.0,
             alpha: 2.0,
             gp: 1.0,
             v_root_max: 120.0,
@@ -547,6 +554,12 @@ impl Plant {
         } else {
             (1.0 - (self.age - p.p_max) / p.p_max.max(1.0)).clamp(0.0, 1.0)
         };
+        // Age-dependent apical control: the effective λ relaxes from `lambda`
+        // toward `lambda − apical_relax` over the plant's life (maturity =
+        // age/p_max), so an excurrent young leader can give way to a decurrent,
+        // spreading old crown (Pałubicki Fig. 10/11; Makowski λ→λ_mature).
+        let maturity = (self.age / p.p_max.max(1.0)).clamp(0.0, 1.0);
+        let lambda = (p.lambda - p.apical_relax * maturity).clamp(0.3, 0.7);
         let q_base = self.node(self.root).q_acc;
         // Tolerance↔growth tradeoff: a shade-tolerant plant (cheap, durable
         // leaves that subsist on low light) grows more slowly. So tolerance buys
@@ -597,8 +610,8 @@ impl Plant {
                 .map(|c| self.node(c).q_acc)
                 .or(if has_lat { Some(q_bud) } else { None });
 
-            let wm = main_q.map(|q| p.lambda * q).unwrap_or(0.0);
-            let wl = lat_q.map(|q| (1.0 - p.lambda) * q).unwrap_or(0.0);
+            let wm = main_q.map(|q| lambda * q).unwrap_or(0.0);
+            let wl = lat_q.map(|q| (1.0 - lambda) * q).unwrap_or(0.0);
             let denom = wm + wl;
             if denom <= 1e-9 {
                 continue;
