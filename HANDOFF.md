@@ -76,8 +76,8 @@ looks like a geometry bug).
 
 | File | What |
 |---|---|
-| `src/plant.rs` | The core. `Plant` (metamers + terminal/lateral/**relay** buds; `live` counter + min-heap free-list back `module_count`/`alloc`), the growth cycle, **sympodial relay** (`relay_bud`, `relay_direction`), the `colonize`/`Occ`/`BudQuery`/`PointGrid`/`DenseOcc` space-colonization core, `FxHasher`/`pack` fast voxel hashing, `hash01` (deterministic bud-fate), self-shadow, shedding, pipe-model diameters, `health` (crown-tip carbon balance), `root_vigor`, geometry queries. |
-| `src/genome.rs` | **The evolving genome.** 17 heritable traits (morphology + life-history incl. lifespan); `random` (founders), `mutated` (heritable seeds), `to_params` (derives marker/module budget from crown volume), `niche` (behaviour descriptor for frequency-dependence), `leaf_rgb`/`bark_rgb` (colour *from* the genome → watch a biome converge). |
+| `src/plant.rs` | The core. `Plant` (metamers + terminal/lateral/**relay** buds; `live` counter + min-heap free-list back `module_count`/`alloc`), the growth cycle, **sympodial relay** (`relay_bud`, `relay_direction`), **age-dependent apical control** (relaxed λ in `vigor_pass`) and **space-responsive crown** (`maturity`, `crown_radius`, expanding `reveal_ceiling`), the `colonize`/`Occ`/`BudQuery`/`PointGrid`/`DenseOcc` space-colonization core, `FxHasher`/`pack` voxel hashing, `hash01` (deterministic bud-fate), self-shadow, shedding, **memoryful** pipe-model diameters (never shrink), `health` (crown-tip carbon), `root_vigor`, geometry queries. |
+| `src/genome.rs` | **The evolving genome.** **18** heritable traits (morphology + life-history incl. `lifespan` and `apical_relax`); `random` (founders), `mutated` (heritable seeds), `to_params` (derives marker/module budget from the *expanded* crown volume), `niche` (behaviour descriptor for frequency-dependence), `leaf_rgb`/`bark_rgb` (colour *from* the genome → watch a biome converge). |
 | `src/species.rs` | 7 plant-type **archetype presets** `preset(λ,D,gp,v_root_max,g2,s_tol,φ,env_h,env_r)` — used ONLY by the single-plant/`--tree` inspector + the morphology tests. The ecosystem evolves genomes, not these. (Climate-niche fields are dead, `#[allow(dead_code)]`.) |
 | `src/ecosystem.rs` | `Ecosystem` (now **genome-based, evolving**): shared marker field (`regenerate_field`, `set_size`/`set_field_height` resize), `ShadowGrid`, `Climate::warmth/water/productivity`, `survival_bar` (2D-climate carbon cost), `cull_dead` (starvation + senescence + **Janzen–Connell** `similar_crowding`), `seed` (inherit+mutate + **seed rain**, vigor-scaled maturity), `mean_traits`/`trait_std`/`established_count`, `step_timed`, parallel grow + mesh gather. |
 | `src/mesh.rs` | Skeleton → generalized-cylinder mesh; foliage quads; **parallel in-place** per-plant-coloured forest mesh (`balanced_ranges`/`carve_mut`/`uninit_vec` → prefix-sum slice fill, no concat). |
@@ -130,12 +130,18 @@ tip carries a terminal bud). `Plant::new(params, origin)`. Each step:
 6. **shedding** (§4.4) — a lateral branch whose mean light is below `shed_ratio`
    is dropped → clean boles under shade (shade-tolerant species keep theirs).
 7. **diameters** — pipe model `d = √(Σ d_child²)`, φ at the tips (Eq. 8), so
-   **trunk diameter ∝ √(leaf count)**.
+   **trunk diameter ∝ √(leaf count)**. With a **memory** (§4.4): diameter is
+   monotonic non-decreasing, so a cleaned bole keeps the girth it grew when it
+   still carried the now-shed crown (width isn't lost when branches are shed).
 
-**Apical control λ ≈ 0.5** spans excurrent↔decurrent (Pałubicki Fig. 7). Max
-height/spread is set by the **marker-cloud envelope** (the principled crown
-silhouette), not λ. Determinacy `D` does double duty (coherently): branch *angle*
-(high D narrow, low D wide) **and** monopodial↔sympodial (see step 5).
+**Apical control λ ≈ 0.5** spans excurrent↔decurrent (Pałubicki Fig. 7), and is
+**age-dependent**: the effective λ relaxes from the genome `lambda` toward
+`lambda − apical_relax` over the plant's life (Pałubicki Fig. 10/11; Makowski
+λ→λ_mature), so a tree can be excurrent young and decurrent old. Crown size is
+set by the **marker-cloud envelope**, which is **space-responsive** (the genome
+value is the young crown; it grows with maturity — see step 1), not by λ.
+Determinacy `D` does double duty (coherently): branch *angle* (high D narrow, low
+D wide) **and** monopodial↔sympodial (see step 5).
 
 ### Ecosystem (Sec. 6) — now EVOLUTIONARY, no fixed species
 
@@ -187,11 +193,14 @@ water on different traits → Whittaker specialization); **carbon model** rework
 (crown-tip raw light, intrinsic size cost, tolerance↔growth tradeoff, reproduce
 only when lit); heritable **lifespan** → gap churn; **seed rain**; **Janzen–
 Connell** frequency-dependence for diversity; genome-derived colour; **sympodial
-branching** via a relay bud; **vigor-scaled maturity**. Viewer: in-place
-**resize** keys, **unthrottled** stepping, **biome labels**. The branch-shape fix
-(default-orientation term, killed the wiggle) and the perf work (below) predate
-this. Reverted as infeasible in this model: ongoing per-segment tropism (weeps
-long branches).
+branching** via a relay bud; **vigor-scaled maturity**; **age-dependent apical
+control** (λ relaxes young→old); **space-responsive crowns** (the elastic envelope
+that lifted self-thinning to ≈ −1.25 and lets old crowns spread); **memoryful
+pipe-model diameters** (never shrink on shedding — a paper-accuracy fix). Viewer:
+in-place **resize** keys, **unthrottled** stepping, **biome labels**. The
+branch-shape fix (default-orientation term, killed the wiggle) and the perf work
+(below) predate this. Reverted as infeasible in this model: ongoing per-segment
+tropism (weeps long branches).
 
 **Earlier (the self-organizing rewrite + perf), recent first:**
 
@@ -252,7 +261,8 @@ A 9-round pass took the worst case (tropical, 40→170 plants, ~80k modules) fro
 **~25 s → ~3.6 s** wall for 170 sim steps (**~7×**; ~149 → ~21 ms/step), and the
 **per-frame mesh rebuild from ~148 ms → ~13 ms** (**~11×**, ~2.2M verts). A heavy
 interactive frame's CPU work (sim + mesh) went from ~300 ms to ~35 ms; the test
-suite from ~231 s to ~3 s. The single biggest fix was an accidental **O(n²)** —
+suite from ~231 s to ~3 s (it is ~18 s today — the multi-seed evolution test was
+added since). The single biggest fix was an accidental **O(n²)** —
 `module_count()` (then O(live)) called inside `grow()`'s per-bud loop, plus a
 linear free-slot scan in `alloc()`.
 
@@ -283,9 +293,10 @@ came out identical and validation slopes held):
 
 Determinism note: the parallel paths are reproducible because chunks are
 contiguous and merged/laid-out in order, independent of thread count or
-scheduling — so a given seed still yields the same stand and the same mesh on
-any machine. The mesh chunk count adapts to cores (capped at `MESH_CHUNKS` /
-`GROW_CHUNKS`); `--no-cache`-style determinism is unaffected.
+scheduling. (NB the "bit-identical 79885 modules" above is the *old fixed-species*
+worst case the perf work was measured against; the current evolving stand is
+lighter — ~10k modules — and is reproducible per seed, but the model changes
+since then mean it is not byte-identical to that historical number.)
 
 ---
 
@@ -299,9 +310,11 @@ morphology, and the validation fits. Tune by reading the numbers **and** a
 
 What to tune:
 - **Genome trait ranges** (`genome.rs` `RANGES`) — the evolvable bounds for all
-  17 traits (λ, determinacy, α, gp, v_root_max, g2, tropism_up, ξ, φ,
+  **18** traits (λ, determinacy, α, gp, v_root_max, g2, tropism_up, ξ, φ,
   shade_tolerance, shed_ratio, env_h, env_r, flowering_age, seed_radius,
-  seed_freq, lifespan). Founders draw uniform here; mutation clamps here.
+  seed_freq, lifespan, **apical_relax**). Founders draw uniform here; mutation
+  clamps here. (Append new traits LAST — the `--stats` key + tests index by
+  position.)
 - **Ecosystem constants** (`ecosystem.rs`): the **2D-climate carbon** consts
   `MAINT_BASE`/`MAINT_VOL`/`MAINT_BREADTH`/`MAINT_FULL_VOL`; `FLOWER_LIGHT`
   (reproduce-only-when-lit threshold); the **Janzen–Connell** `JC_RADIUS`/
@@ -309,7 +322,8 @@ What to tune:
   `IMMIGRANT_FRAC`; `CARBON_ESTABLISH`; `max_plants`; `mutation_rate`.
 - **Global plant feel** (`PlantParams`/`plant.rs` consts): `MAX_SHOOT`, `ξ`
   (axis-stiffness, default 0.25 — low = straight/stiff, high = wandering),
-  `FIELD_DENSITY`, `MAX_FIELD_HEIGHT` (now just the default field ceiling),
+  `CROWN_EXPAND_R`/`CROWN_EXPAND_H` (how far the space-responsive crown grows with
+  age), `FIELD_DENSITY`, `MAX_FIELD_HEIGHT` (now just the default field ceiling),
   `OCC_R`/`PER_R`/`PER_COS`.
 - **Archetype presets** (`species.rs`) — only affect the single-plant/`--tree`
   inspector and the morphology tests, *not* the evolving ecosystem.
@@ -326,15 +340,15 @@ What to tune:
 
 ## Known limitations & gotchas
 
-1. **Performance** — much improved (see the Performance section): a heavy
-   tropical frame is now ~21 ms sim + ~13 ms CPU mesh build (was ~150 + ~150),
-   and the test suite is **~3 s** (was ~4 min). The remaining interactive cost
-   is the **GPU upload** — `Mesh::new` re-uploads all ~2.2M verts every dirty
-   frame; `--bench` does NOT measure that. Cutting it is the **LOD / instancing /
-   vertex-reduction** future item. Still: **don't run multiple `cargo`
-   invocations at once** (they fight the build lock); use `run_in_background`.
-   Bench on `--release` and prefer a low-load box (a busy machine inflates all
-   phases — watch `loadavg`).
+1. **Performance** — healthy. The evolving stand is *lighter* than the old
+   hand-tuned giants the perf section benchmarks (~10k modules vs ~80k), so a
+   heavy frame is now ~**8–11 ms sim** + ~**7–9 ms** CPU mesh build. The test
+   suite is **~18 s** (most of it the multi-seed evolution test; the mechanism
+   tests are a few seconds). The remaining interactive cost is the **GPU upload**
+   — `Mesh::new` re-uploads all verts every dirty frame; `--bench` does NOT
+   measure that → the **LOD / instancing** future item. Still: **don't run
+   multiple `cargo` invocations at once** (build-lock); use `run_in_background`.
+   Bench on `--release`, low-load box (a busy machine inflates all phases).
 2. **`--shot`/`--tree` "Segmentation fault" ≠ failed render** (exits after writing
    the PNG to skip the Wayland teardown). Always Read the PNG. Check `nvidia-smi`
    if renders OOM.
@@ -381,7 +395,7 @@ What to tune:
 ---
 
 ## Conventions
-- Verification here = `cargo test --release` (CPU, ~3 s) + `cargo run -- --stats`
+- Verification here = `cargo test --release` (CPU, ~18 s) + `cargo run -- --stats`
   (CPU) + a `--tree`/`--shot` PNG you actually open; `--bench` for perf. Commit
   freely; small commits preferred.
 - See `../CLAUDE.md` for workspace context (mostly Verus-specific; this subproject
