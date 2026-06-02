@@ -59,7 +59,7 @@ On NixOS the windowing libraries are provided via `shell.nix`:
 ./run.sh                 # single-plant viewer (cycle the archetype species)
 cargo run -- --stats     # headless: evolution trace, 2D specialization, validation
 cargo run --release -- --bench   # headless performance benchmark (sim + mesh)
-cargo test --release     # 30 tests (CPU)
+cargo test --release     # 31 tests (CPU)
 ./run.sh --tree 6 --steps 200 --shot t.png                 # one archetype, framed
 ./run.sh --shot e.png --temp 26 --precip 320 --steps 170   # an ecosystem frame
 ```

@@ -39,7 +39,7 @@ cd synthetic-sylvaculture
 ./run.sh                 # single-plant viewer (N cycles species)
 cargo run -- --stats     # headless readouts: EVOLUTION trace, 2D specialization, validation
 cargo run --release -- --bench   # headless perf benchmark (sim + mesh; see Performance)
-cargo test --release     # 30 tests (no GPU); ~18 s
+cargo test --release     # 31 tests (no GPU); ~18 s
 ./run.sh --tree 6 --steps 200 --shot t.png            # ONE archetype species, framed solo
 ./run.sh --tree 0 --steps 160 --bare --shot t.png     # ...skeleton only (branch geometry)
 ./run.sh --shot e.png --temp 26 --precip 320 --steps 170   # ecosystem frame (+ biome chart)
@@ -78,7 +78,7 @@ looks like a geometry bug).
 
 | File | What |
 |---|---|
-| `src/plant.rs` | The core. `Plant` (metamers + terminal/lateral/**relay** buds; `live` counter + min-heap free-list back `module_count`/`alloc`), the growth cycle, **sympodial relay** (`relay_bud`, `relay_direction`), **age-dependent apical control** (relaxed λ in `vigor_pass`), **space-responsive crown** (`maturity`, `crown_radius`, expanding `reveal_ceiling`), **basitony** (basal laterals up-right into a multi-stem bush, in `lateral_direction`), the `colonize`/`Occ`/`BudQuery`/`PointGrid`/`DenseOcc` space-colonization core, `FxHasher`/`pack` voxel hashing, `hash01` (deterministic bud-fate), self-shadow, shedding, **memoryful** pipe-model diameters (never shrink), `health` (crown-tip carbon), `root_vigor`, geometry queries. |
+| `src/plant.rs` | The core. `Plant` (metamers + terminal/lateral/**relay** buds; `live` counter + min-heap free-list back `module_count`/`alloc`), the growth cycle, **sympodial relay** (`relay_bud`, `relay_direction`), **age-dependent apical control** (relaxed λ in `vigor_pass`), **space-responsive crown** (`maturity`, `crown_radius`, expanding `reveal_ceiling`), **basitony** (basal laterals up-right into a multi-stem bush, in `lateral_direction`), the `colonize`/`Occ`/`BudQuery`/`PointGrid`/`DenseOcc` space-colonization core, `FxHasher`/`pack` voxel hashing, `hash01` (deterministic bud-fate), self-shadow, shedding, **memoryful** pipe-model diameters (never shrink), **biomechanical breaking** (`break_overstressed`/`bending_stress`: cantilever stress > `BREAK_STRESS` snaps a branch), `health` (crown-tip carbon), `root_vigor`, geometry queries. |
 | `src/genome.rs` | **The evolving genome.** **19** heritable traits (morphology + life-history incl. `lifespan`, `apical_relax`, and `basitony` = shrub habit); `random` (founders), `mutated` (heritable seeds), `to_params` (derives marker/module budget from the *expanded* crown volume), `niche` (behaviour descriptor for frequency-dependence), `leaf_rgb`/`foliage_style` (colour *and* broad↔needle leaf shape *from* the genome → watch a biome converge), `bark_rgb`. |
 | `src/species.rs` | 7 plant-type **archetype presets** `preset(λ,D,gp,v_root_max,g2,s_tol,φ,env_h,env_r)` — used ONLY by the single-plant/`--tree` inspector + the morphology tests. The ecosystem evolves genomes, not these. (Climate-niche fields are dead, `#[allow(dead_code)]`.) |
 | `src/ecosystem.rs` | `Ecosystem` (now **genome-based, evolving**): shared marker field (`regenerate_field`, `set_size`/`set_field_height` resize), `ShadowGrid`, `Climate::warmth/water/productivity`, `survival_bar` (2D-climate carbon cost), `cull_dead` (starvation + senescence + **Janzen–Connell** `similar_crowding`), `seed` (inherit+mutate + **seed rain** + **clonal/vegetative spread** for basitonic shrubs, vigor-scaled maturity), `mean_traits`/`trait_std`/`established_count`/`stratum_counts`, `step_timed`, parallel grow + mesh gather. |
@@ -140,6 +140,17 @@ tip carries a terminal bud). `Plant::new(params, origin)`. Each step:
    **trunk diameter ∝ √(leaf count)**. With a **memory** (§4.4): diameter is
    monotonic non-decreasing, so a cleaned bole keeps the girth it grew when it
    still carried the now-shed crown (width isn't lost when branches are shed).
+8. **breaking** (`break_overstressed`, an extension *beyond* the papers) — each
+   internode is a **cantilever**: bending stress at its base ≈ (distal subtree
+   weight × horizontal lever-arm) / (section modulus ∝ `diam³`). Past
+   `BREAK_STRESS` the branch **snaps off** (mechanical failure, distinct from
+   shedding). Vertical leaders have ~zero lever arm (safe); long horizontal
+   cantilevers break once they over-extend past what their pipe-model thickness
+   supports. Trunk (order 0) is exempt. NB the pipe model *already* keeps healthy
+   stress roughly uniform (~200–370, the uniform-stress hypothesis), so breaking
+   only trims the ecosystem's over-extended tail (leaners / gap-reaching crowns,
+   which run to ~2400) — after it, the stand's max stress is capped at the
+   threshold, i.e. every standing branch is physically supportable.
 
 **Apical control λ ≈ 0.5** spans excurrent↔decurrent (Pałubicki Fig. 7), and is
 **age-dependent**: the effective λ relaxes from the genome `lambda` toward
@@ -260,8 +271,10 @@ conifers grow needle sprays, broadleaves wide leaves); **bushes** (a heritable
 `basitony` trait — the 19th — that up-rights basal laterals into a multi-stemmed
 shrub clump, plus a lowered height floor so short shrubs are reachable); **clonal
 / vegetative spread** (basitonic plants sucker near-clones without flowering →
-a self-sustaining understory thicket layer, bypassing the tall-biased seed pool).
-Viewer:
+a self-sustaining understory thicket layer, bypassing the tall-biased seed pool);
+**biomechanical breaking** (over-extended cantilever branches snap when the pipe-
+model thickness can't bear the load — caps the over-stressed tail); a **leakier
+canopy** (`ShadowGrid.c` 8→11 → brighter dappled floor). Viewer:
 in-place **resize** keys, **unthrottled** stepping, **biome labels**. The
 branch-shape fix (default-orientation term, killed the wiggle) and the perf work
 (below) predate this. Reverted as destabilizing/infeasible in this model: ongoing
@@ -290,13 +303,13 @@ Known limitations); an explicit **hemispherical sun** (zenith + oblique deposits
 - earlier: the retired module model (M1–M5) — ecosystem/mesh/overlay/shot
   infrastructure carried forward; only the plant-growth core was replaced.
 
-**30 tests pass.** The `plant.rs` mechanism suite verifies the equations directly
+**31 tests pass.** The `plant.rs` mechanism suite verifies the equations directly
 (BH split, `n=⌊v⌋`, basipetal light, pipe model √Σd², shedding, senescence, vigor
-conservation, growth bounded). `ecosystem.rs` tests cover the emergent properties
-(2D climate specialization — multi-seed since the established cohort is small/
-noisy; shadowing suppresses biomass; canopy stays upright; resize culls
-out-of-bounds). `species.rs`/`overlay.rs` tests are non-degeneracy + glyph-coverage
-sanity.
+conservation, growth bounded, **cantilever breaks / vertical survives**).
+`ecosystem.rs` tests cover the emergent properties (2D climate specialization —
+multi-seed since the established cohort is small/noisy; shadowing suppresses
+biomass; canopy stays upright; resize culls out-of-bounds; floor-light sane).
+`species.rs`/`overlay.rs` tests are non-degeneracy + glyph-coverage sanity.
 
 ---
 
@@ -400,6 +413,11 @@ What to tune:
   `CLONE_BASITONY_MIN` (understory thicket density — too high risks a clonal
   takeover; A/B against `CLONE_FREQ=0`); `CARBON_ESTABLISH`; `max_plants`;
   `mutation_rate`.
+- **Biomechanics** (`plant.rs` consts): `BREAK_STRESS` (cantilever stress at
+  which a branch snaps — above the healthy ~200–370 band so only over-extended
+  branches break; lower = more breakage), `LEAF_MASS` (tip foliage weight). Set
+  `BREAK_STRESS` ≥ 1e9 to disable (A/B). Read the per-species `max_stress` +
+  grown-stand stress distribution in `--stats`.
 - **Global plant feel** (`PlantParams`/`plant.rs` consts): `MAX_SHOOT`, `ξ`
   (axis-stiffness, default 0.25 — low = straight/stiff, high = wandering),
   `CROWN_EXPAND_R`/`CROWN_EXPAND_H` (how far the space-responsive crown grows with
@@ -496,7 +514,7 @@ What to tune:
 ---
 
 ## Conventions
-- Verification here = `cargo test --release` (CPU, ~18 s) + `cargo run -- --stats`
+- Verification here = `cargo test --release` (CPU, ~18 s, 31 tests) + `cargo run -- --stats`
   (CPU) + a `--tree`/`--shot` PNG you actually open; `--bench` for perf. Commit
   freely; small commits preferred.
 - See `../CLAUDE.md` for workspace context (mostly Verus-specific; this subproject
